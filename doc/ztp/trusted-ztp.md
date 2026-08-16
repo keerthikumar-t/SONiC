@@ -1,14 +1,67 @@
-# tztp (trusted Zero Touch Provisioning) HLD #
+# Trusted Zero Touch Provisioning (Trusted ZTP) for SONiC
 
-## Table of Content 
+## High Level Design Document
 
-### 1. Revision  
+**Feature:** Trusted ZTP (tZTP) — RFC 8572 Secure Zero Touch Provisioning for SONiC
+**Version:** 1.0
+**Status:** Draft — submitted for SONiC community HLD review
+**Target release:** To be assigned by the SONiC TSC
 
-### 2. Scope  
+---
 
-This section describes the scope of this high-level design document in SONiC.
+## Table of Contents
 
-### 3. Definitions/Abbreviations 
+1. [Revision History](#1-revision-history)
+2. [About This Document](#2-about-this-document)
+3. [Scope](#3-scope)
+4. [Definitions and Abbreviations](#4-definitions-and-abbreviations)
+5. [Overview](#5-overview)
+6. [Motivation: Security Gaps in Today's ZTP](#6-motivation-security-gaps-in-todays-ztp)
+7. [Open-Source Building Blocks: Evidence-Based Selection](#7-open-source-building-blocks-evidence-based-selection)
+
+
+### 1. Revision History  
+
+| Version | Date | Author | Description |
+|:-------:|:-----|:-------|:------------|
+| 1.0 | 2026-08-06 | T Keerthi Kumar, Sandeep K | Initial draft. |
+
+
+### 2. About This Document  
+
+This High Level Design (HLD) proposes **Trusted ZTP (tZTP)** — a standards-based, cryptographically secured onboarding capability for SONiC based on **RFC 8572 (Secure Zero Touch Provisioning)**.
+
+The design is intentionally conservative: it **augments** the existing `sonic-ztp` service rather than replacing it, **reuses** a mature, permissively licensed RFC 8572 implementation rather than writing the security-critical protocol from scratch, and remains **disabled by default** so that existing deployments are unaffected. The recommendations for which open-source components to adopt are backed by primary-source repository data (summarised in [Appendix A](#appendix-a-primary-source-evidence)), not vendor marketing claims.
+
+
+### 3. Scope  
+
+This document describes **Phase 1** of Trusted Zero Touch Provisioning (tZTP) for SONiC userspace. tZTP extends the existing `ztpd` daemon with cryptographic security without breaking backward compatibility.
+
+
+**In scope — Phase 1 (this document):**
+
+- RFC 8572 secure bootstrapping on the SONiC device (the *pledge*), over authenticated TLS 1.3 to a bootstrap server (mutual TLS with the IDevID in Phase 2).
+- Validation of the ownership voucher, the owner certificate, and the CMS signature over the onboarding payload, before any configuration is applied.
+- Integration with the existing `sonic-ztp` engine and its plugin model, so that validated payloads are applied through today's provisioning path.
+- An immutable first-boot trust plane (`bootstrap.json`), support for both RFC 8572 trust models, and trusted-time handling for clock-less first boot.
+- Configuration expressed as a YANG model, operational visibility in STATE_DB with a durable audit trail, and CLI.
+- DHCP Option 143 (`sztp-redirect`, RFC 8572 §8.1 structured URI list) strict enforcement in trusted mode
+- A secure-only enforcement mode that disables the legacy insecure discovery and transport paths.
+- Full backward compatibility with existing ZTP deployments
+- Operation on hardware **without** a TPM, using a file-based device certificate.
+
+**In scope — Phase 2 (design seams defined here; full design in a follow-up HLD):**
+
+- Hardware-rooted device identity using TPM 2.0 and IEEE 802.1AR IDevID/LDevID, with certificate enrollment and renewal.
+
+**Out of scope:**
+
+- The secure bootstrap server implementation itself
+- ONIE-layer tZTP (NOS image download security). Tracked at opencomputeproject/onie
+- 
+---
+### 4. Definitions/Abbreviations 
 
 This section covers the abbreviation if any, used in this high-level design document and its definitions.
 
