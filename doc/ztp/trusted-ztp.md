@@ -17,7 +17,8 @@
 4. [Definitions and Abbreviations](#4-definitions-and-abbreviations)
 5. [Overview](#5-overview)
 6. [Requirements](#6-requirements)
-
+7. [Architecture](#7-architecture)
+8. [High-Level Design](#8-high-level-design)
 
 ### 1. Revision History  
 
@@ -93,6 +94,7 @@ This document describes **Phase 1** of Trusted Zero Touch Provisioning (tZTP) fo
 | **pinned-domain-cert** | The certificate pinned inside the ownership voucher (RFC 8366) that identifies the owner the device must trust. |
 | **Manufacturer anchor** | The manufacturer signing trust anchor, baked in at the factory, used to verify the ownership voucher. |
 | **CMS SignedData** | The RFC 5652 signed structure wrapping the onboarding information; its signer must be the owner certificate. |
+| **Canonical Architecture** | An architecture that uses a single, standard, and shared model for data or design. |
 | **HLD** | High Level Design document |
 
 ---
@@ -267,13 +269,262 @@ The feature is named **tZTP (Trusted ZTP)** rather than sZTP to emphasise that t
 
 ### 7. Architecture Design 
 
-This section covers the changes that are required in the SONiC architecture. In general, it is expected that the current architecture is not changed.
-This section should explain how the new feature/enhancement (module/sub-module) fits in the existing architecture. 
+Trusted ZTP is an additive, management-plane feature. This section places it in the SONiC architecture, zooms into its internal components and secure data flow in next sectinos.
 
-If this feature is a SONiC Application Extension mention which changes (if any) needed in the Application Extension infrastructure to support new feature.
+Trusted ZTP operates entirely in the SONiC **management plane**. It has no interaction with the ASIC, SAI, `orchagent`, or `syncd`. It reads and writes CONFIG_DB and STATE_DB, reads trust material from the filesystem, and — in Phase 2 — uses the TPM. Its only external interaction is an outbound TLS session to the bootstrap server. 
 
+Because the ZTP process handles data received from potentially untrusted networks during initial device boot, the network-facing bootstrap and file-parsing components are designed to run with limited privileges and within a sandboxed environment i.e.
+
+- Network-sourced data is processed in a restricted environment with minimal privileges.
+- The bootstrap and parsing components are isolated from critical system functions.
+- The root-level configuration engine is separated from the network-facing components.
+- If a vulnerability is exploited in the provisioning or parsing process, the impact is limited by the sandbox and privilege restrictions.
+- This reduces the risk of unauthorized access to the underlying operating system during the initial provisioning phase.
+
+
+#### Footprint on the SONiC Architecture
+
+The SONiC community's canonical architecture organises the system as application containers interacting through a **central Redis database**, above the SWSS / `syncd` / SAI stack and the ASIC. Trusted ZTP fits into that picture with a deliberately small footprint: it extends the existing **native `sonic-ztp` host service**, adds a CLI, and adds tables to **CONFIG_DB** and **STATE_DB**. Everything below the database — SWSS, `syncd`, SAI, and the ASIC — **is untouched**.
+
+```mermaid
+flowchart TB
+
+    %% Application Containers
+    subgraph APPS["Application Containers (Docker)"]
+        BGP[bgp]
+        LLDP[lldp]
+        SNMP[snmp]
+        TEAMD[teamd]
+        DHCPR[dhcp-relay]
+        PMON[pmon]
+    end
+
+    %% Central Database
+    subgraph REDIS["Central Database (Redis)"]
+        APPL[APPL_DB]
+
+        ASICDB[ASIC_DB]
+        STATEDB["STATE_DB<br/>+ TZTP status / audit"]
+        CONFIGDB["CONFIG_DB<br/>+ TZTP tables"]
+        COUNTERS[COUNTERS_DB]
+    end
+
+    %% SWSS
+    subgraph SWSS["SWSS"]
+        ORCH[orchagent]
+    end
+
+    %% Management Plane
+    subgraph MGMT["Management Plane"]
+        TZTP["sonic-ztp<br/>native host service<br/><br/>+ Trusted ZTP front-end"]
+
+        CLI["CLI<br/>show/config tztp"]
+
+        API["gNMI / REST / telemetry"]
+    end
+
+    %% External Infrastructure
+    subgraph EXT["External Infrastructure"]
+        DHCP["DHCP<br/>(Option 143 / Option 67)"]
+        BOOT["RFC 8572<br/>Bootstrap Server"]
+    end
+
+    %% Hardware Platform
+    subgraph HW["Hardware Platform"]
+        SYNCD[syncd]
+        SAI[SAI]
+        ASIC[ASIC]
+        TPM["TPM 2.0<br/>(Phase 2)"]
+    end
+
+    %% Relationships
+    BGP --> APPL
+    LLDP --> APPL
+    SNMP --> APPL
+    TEAMD --> APPL
+    DHCPR --> APPL
+    PMON --> APPL
+
+    APPL --> ORCH
+
+    ORCH --> ASICDB
+
+    ASICDB --> SYNCD
+    SYNCD --> SAI
+    SAI --> ASIC
+
+    DHCP --> TZTP
+    BOOT --> TZTP
+
+    TZTP --> CONFIGDB
+    TZTP --> STATEDB
+
+    CLI --> CONFIGDB
+    API --> STATEDB
+
+    TZTP -. Phase 2 .-> TPM
+```
+`
 
 ### 8. High-Level Design 
+
+Within the `sonic-ztp` service, Trusted ZTP introduces a secure front-end architecture where each module is responsible for a specific function. This separation of responsibilities improves maintainability, security, and flexibility.
+
+The implementation reuses the RFC 8572 Secure Zero Touch Provisioning client (`sztp-agent`), which is isolated behind a dedicated adapter layer. This design ensures that the SZTP client can be upgraded, modified, or replaced without affecting other components of the Trusted ZTP framework.
+
+### 8.1 Key Design Principles
+
+- Each module has a single, well-defined responsibility.
+- The architecture separates security-critical functions from other processing tasks.
+- The RFC 8572 client (`sztp-agent`) is encapsulated behind an adapter interface.
+- Changes to the SZTP client have minimal impact on the rest of the system.
+- The modular design simplifies maintenance, testing, and future enhancements.
+
+### 8.2 tZTP Components & Data Flow
+
+During a successful secure provisioning process:
+
+1. The Trusted ZTP front-end receives provisioning requests.
+2. The adapter communicates with the RFC 8572 `sztp-agent`.
+3. The `sztp-agent` performs secure provisioning operations.
+4. Provisioning data is validated and processed by the appropriate modules.
+5. The root-level configuration engine applies the approved configuration to the device.
+
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 26}, 'themeVariables': {'fontSize': '12px'}}}%%
+flowchart TB
+    BJSON["bootstrap.json"]:::io --> TB["TrustBootstrap"]:::new
+    DHCP["DHCP opt 143/136"]:::io --> DISC["Discovery"]:::new
+    TB --> DISC
+    DISC --> ADP["SztpClientAdapter"]:::new
+    ADP --> AGT["sztp-agent<br/>(reused)"]:::reuse
+    AGT <-->|"TLS"| BS["Bootstrap server<br/>(off-device)"]:::io
+    AGT -->|"payload"| ADP
+    ADP --> TA["TimeAnchor"]:::new
+    ADP --> PM["PayloadMapper"]:::new
+    ADP --> IM["IdentityManager<br/>(Phase 2)"]:::new
+    ADP --> AS["AuditSink"]:::new
+    PM -->|"ztp_data.json"| ENG["ztp-engine<br/>(reused)"]:::reuse
+    ENG --> CDB["CONFIG_DB"]:::io
+    AS --> SDB["STATE_DB + syslog"]:::io
+
+    classDef new fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
+    classDef reuse fill:#d6eaf8,stroke:#2471a3,color:#154360
+    classDef io fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
+```
+
+#### Component Responsibilities
+
+Trusted ZTP enhances the existing SONiC ZTP service by introducing seven lightweight modules while reusing two existing components. The reused components handle the complex operations such as cryptographic validation and configuration deployment, while the new modules integrate secure provisioning capabilities into SONiC.
+
+Each component is designed with a single, clearly defined responsibility.
+
+##### 01. TrustBootstrap
+**Type:** New 
+
+Responsible for loading the read-only `bootstrap.json` file during startup. It determines the device's trust model and ensures that all required trust information is available. If any mandatory trust material is missing, the module immediately stops the provisioning process (fail-closed behavior) to prevent insecure onboarding.
+
+`bootstrap.json` is a small, **read-only** file placed on the switch at the factory or during staging, `/etc/sonic/tztp/bootstrap.json`, only `TrustBootstrap` module reads this file.
+
+```json
+{
+  "tztp_bootstrap": {
+    "schema_version": "1.0",
+    "trusted_mode": true,
+    "enforce": true,
+    "discovery": ["dhcp-opt143", "dhcp-opt136", "static"],
+    "static_servers": ["https://bootstrap.example.net"],
+    "trust_model": "voucher-anchored",
+    "require_ownership_voucher": true,
+    "tls_minimum_version": "TLSv1.3",
+    "identity_source": "file",
+    "device_cert": "/etc/sonic/tztp/device.crt",
+    "device_key": "/etc/sonic/tztp/device.key",
+    "trust_anchors_path": "/etc/sonic/tztp/trust/",
+    "sztp_client": "sztp-agent",
+    "sztp_client_version_range": ">=0.2.0,<0.3.0"
+  }
+}
+```
+
+##### 02. Discovery
+**Type:** New 
+
+Discovers bootstrap server information using DHCP Option 143/136 or static configuration. In enforced secure mode, it rejects legacy discovery methods that do not meet Trusted ZTP security requirements.
+
+##### 03. SztpClientAdapter
+**Type:** New 
+
+Acts as an abstraction layer between SONiC and the RFC 8572 Secure Zero Touch Provisioning (SZTP) client. This is the only module aware of the underlying implementation of the SZTP client. It executes the client and translates the results into SONiC provisioning outcomes such as:
+
+- `SUCCESS`
+- `SUSPEND`
+- `FAILED`
+
+##### 04. TimeAnchor
+**Type:** New 
+
+Ensures that the system clock is trustworthy during provisioning. If the device detects an invalid or incorrect time, it derives a trusted timestamp from the voucher's `created-on` field and uses it as a secure time reference.
+
+##### 05. PayloadMapper
+**Type:** New 
+
+Converts the validated provisioning payload received through SZTP into SONiC's standard provisioning format, `ztp_data.json`, allowing the existing ZTP framework to process it without modification.
+
+##### 06. AuditSink
+**Type:** New 
+
+Records provisioning status, security events, and audit information into SONiC's `STATE_DB` and system logs. This provides visibility and traceability for provisioning operations.
+
+##### 07. IdentityManager
+**Type:** New (Phase 2)
+
+Manages hardware-based device identities stored in the TPM, including:
+
+- Initial Device Identity (IDevID)
+- Local Device Identity (LDevID)
+
+It also handles secure certificate and key renewal operations while ensuring the private keys remain protected.
+
+##### 08. sztp-agent
+**Type:** Reused (Go)
+
+The existing RFC 8572 Secure Zero Touch Provisioning client responsible for:
+
+- TLS communication
+- Voucher validation
+- Signature verification
+- Secure payload retrieval
+- Provisioning progress reporting
+
+This component performs the core cryptographic and secure communication functions required for Trusted ZTP.
+
+##### 09. ztp-engine.py and Plugins
+**Type:** Reused (Python)
+
+The existing SONiC configuration engine that applies:
+
+- Boot images
+- Device configurations
+- Provisioning scripts
+
+No changes are required to this component. It continues to perform configuration deployment using the validated data provided by Trusted ZTP.
+
+### 8.3 Impacted SONiC Repositories
+The impact per repository and data store is summarised below.
+
+| SONiC component | Impact | What changes |
+|:----------------|:-------|:-------------|
+| `sonic-ztp` | New modules; existing engine unchanged | A secure front-end (seven new modules) runs ahead of the existing engine |
+| `sonic-buildimage` | Modified | Vendors the `sztp-agent` `.deb`, adds the DHCP option-143 configuration, and (Phase 2) the TPM userspace stack |
+| `sonic-yang-models` | New model | `sonic-tztp.yang` with the security constraints |
+| `sonic-utilities` | New CLI | `show` / `config tztp` commands |
+| `sonic-mgmt` | New tests | Trusted ZTP test plan |
+| CONFIG_DB | New table | `TZTP` configuration |
+| STATE_DB | New tables | `TZTP` status and audit |
+| SAI / orchagent / syncd / ASIC | **None** | No data-plane or hardware-abstraction impact |
+
 
 This section covers the high level design of the feature/enhancement. This section covers the following points in detail.
 		
