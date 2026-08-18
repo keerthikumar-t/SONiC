@@ -893,9 +893,50 @@ The impact per repository and data store is summarised below.
 | SAI / orchagent / syncd / ASIC | **None** | No data-plane or hardware-abstraction impact |
 
 
-### 8.4 Provisioning Workflow
+### 8.4 Mode Selection Design 
 
-#### 8.4.1 Successful Bootstrap (Voucher-Anchored)
+Trusted ZTP is **off by default and must be opted into**. At the very start of provisioning, the switch decides which path to take — secure or legacy — and, in one specific setting, may fall back from secure to legacy. This has to be exactly right, because a switch that has not opted in must behave just like SONiC does today.
+
+**Where the choice comes from.** The switch looks for `trusted_mode` in the trust-plane file - bootstrap.json (new switch) or in CONFIG_DB (already-configured switch). If it is set nowhere, it is **false**. Together with the `enforce` flag, this gives three modes:
+
+| `trusted_mode` | `enforce` | Behaviour |
+|:--------------:|:---------:|:----------|
+| false | — | **Default.** Legacy ZTP only; no change from today. |
+| true | false | **Transition mode.** Try Trusted ZTP first; fall back to legacy ZTP only if the secure path cannot even be started. For staged rollout; *not fully secure*. |
+| true | true | **Secure-only.** Legacy option-67/239 discovery and unauthenticated transports are switched off; any missing trust material or failed check stops provisioning. Blocks downgrade attacks. |
+
+The `TRUST_FALLBACK_LEGACY` audit event marks a transition-mode fallback. The full start-up decision — including both the default and the transition-mode fallback — is shown below.
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 26}, 'themeVariables': {'fontSize': '12px'}}}%%
+flowchart TD
+    START["ZTP starts"]:::decision --> Q1{"trusted_mode<br/>enabled?"}:::decision
+    Q1 -->|"no (default)"| LEGACY["Legacy ztp-engine<br/>TZTP = DISABLED"]:::legacy
+    Q1 -->|"yes"| TB{"trust plane<br/>valid?"}:::decision
+    TB -->|"no, enforce=false"| LEGACY
+    TB -->|"no, enforce=true"| FAILC["Fail closed<br/>TZTP = FAILED"]:::fail
+    TB -->|"yes"| DISC{"secure server<br/>found?"}:::decision
+    DISC -->|"no, enforce=false"| LEGACY
+    DISC -->|"no, enforce=true"| FAILC
+    DISC -->|"yes"| SEC["Trusted ZTP<br/>secure bootstrap"]:::secure
+    SEC --> R{"outcome?"}:::decision
+    R -->|"success"| APPLY["Apply payload<br/>TZTP = SUCCESS"]:::secure
+    R -->|"suspend"| SEC
+    R -->|"failed"| FAILC
+
+    classDef decision fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
+    classDef secure fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
+    classDef legacy fill:#fdebd0,stroke:#b9770e,color:#5c3c04
+    classDef fail fill:#f5b7b1,stroke:#a93226,color:#641e16
+```
+
+* Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy.*
+
+
+
+### 8.5 Provisioning Workflow
+
+#### 8.5.1 Successful Bootstrap (Voucher-Anchored)
 
 The following sequence shows a successful secure provisioning using the recommended voucher-anchored model.
 
@@ -946,7 +987,7 @@ sequenceDiagram
 12. **Record and finish** — the engine writes `status = SUCCESS` with audit events, and the agent sends `bootstrap-complete`.
 
 
-#### 8.4.2 Trust-Validation Failure (Fail-Closed)
+#### 8.5.2 Trust-Validation Failure (Fail-Closed)
 
 If any trust check fails, the device stops and applies nothing. In enforced mode there is no fallback to the legacy path.
 
@@ -980,7 +1021,7 @@ sequenceDiagram
 7. **Fail closed** — nothing (image, configuration, or script) is applied; in enforced mode there is **no** fallback to the legacy path.
 
 
-#### 8.4.3 Legacy Provisioning (Secure Option Disabled)
+#### 8.5.3 Legacy Provisioning (Secure Option Disabled)
 
 When Trusted ZTP is not opted in — `trusted_mode = false` (the default), or a transition-mode fallback because no secure server was offered — the switch runs the existing ZTP flow unchanged. It is shown here for contrast: it carries today's weak security posture, which Trusted ZTP is designed to replace.
 
@@ -1015,68 +1056,58 @@ sequenceDiagram
 
 ---
 
+### 9. SAI API 
+
+No SAI API changes are required. Trusted ZTP operates wholly within the SONiC management plane and does not interact with the ASIC, `orchagent`, `syncd`, or SAI.
+
+---
+
+### 10. Implementation Phasing
+The work is delivered in phases so that Phase 1 provides real security on today's hardware without waiting for hardware-dependent capabilities.
+
+| Phase | Objective | Trust depth | Hardware requirement | Where specified |
+|:-----:|:----------|:------------|:---------------------|:----------------|
+| **1** | Trusted ZTP in SONiC userspace | Voucher and certificate (file-based identity) | None — runs today | This HLD |
+| **2** | Hardware-rooted identity | TPM 2.0 and IEEE 802.1AR IDevID/LDevID with EST | TPM and factory IDevID ([O3](#20-open-items)) | Follow-up HLD |
+| **3** | Close the ONIE image-download window | Authenticated NOS image retrieval | ONIE support | Future (opencomputeproject/onie) |
+
+Phases 1 and 2 deepen the *trust model*; Phase 3 widens *coverage* to the pre-SONiC boot stage. They are independent and may proceed in parallel.
+
+---
 
 
-This section covers the high level design of the feature/enhancement. This section covers the following points in detail.
-		
-	- Is it a built-in SONiC feature or a SONiC Application Extension?
-	- What are the modules and sub-modules that are modified for this design?
-	- What are the repositories that would be changed?
-	- Module/sub-module interfaces and dependencies. 
-	- SWSS and Syncd changes in detail
-	- DB and Schema changes (APP_DB, ASIC_DB, COUNTERS_DB, LOGLEVEL_DB, CONFIG_DB, STATE_DB)
-	- Sequence diagram if required.
-	- Linux dependencies and interface
-	- Warm reboot requirements/dependencies
-	- Fastboot requirements/dependencies
-	- Scalability and performance requirements/impact
-	- Memory requirements
-	- Docker dependency
-	- Build dependency if any
-	- Management interfaces - SNMP, CLI, RestAPI, etc.,
-	- Serviceability and Debug (logging, counters, trace etc) related design
-	- Is this change specific to any platform? Are there dependencies for platforms to implement anything to make this feature work? If yes, explain in detail and inform community in advance.
-	- SAI API requirements, CLI requirements, ConfigDB requirements. Design is covered in following sections.
-
-
-### 8. SAI API 
-
-This section covers the changes made or new API added in SAI API for implementing this feature. If there is no change in SAI API for HLD feature, it should be explicitly mentioned in this section.
-This section should list the SAI APIs/objects used by the design so that silicon vendors can implement the required support in their SAI. Note that the SAI requirements should be discussed with SAI community during the design phase and ensure the required SAI support is implemented along with the feature/enhancement.
-
-
-### 9. Configuration and management 
+### 11. Configuration and management 
 This section should have sub-sections for all types of configuration and management related design. Example sub-sections for "CLI" and "Config DB" are given below. Sub-sections related to data models (YANG, REST, gNMI, etc.,) should be added as required.
 If there is breaking change which may impact existing platforms, please call out in the design and get platform vendors reviewed. 
 
-#### 9.1. Manifest (if the feature is an Application Extension)
+#### 11.1. Manifest (if the feature is an Application Extension)
 
 Paste a preliminary manifest in a JSON format.
 
-#### 9.2. CLI/YANG model Enhancements 
+#### 11.2. CLI/YANG model Enhancements 
 
 This sub-section covers the addition/deletion/modification of CLI changes and YANG model changes needed for the feature in detail. If there is no change in CLI for HLD feature, it should be explicitly mentioned in this section. Note that the CLI changes should ensure downward compatibility with the previous/existing CLI. i.e. Users should be able to save and restore the CLI from previous release even after the new CLI is implemented. 
 This should also explain the CLICK and/or KLISH related configuration/show in detail.
 https://github.com/sonic-net/sonic-utilities/blob/master/doc/Command-Reference.md needs be updated with the corresponding CLI change.
 
-#### 9.3. Config DB Enhancements  
+#### 11.3. Config DB Enhancements  
 
 This sub-section covers the addition/deletion/modification of config DB changes needed for the feature. If there is no change in configuration for HLD feature, it should be explicitly mentioned in this section. This section should also ensure the downward compatibility for the change. 
 
 		
-### 10. Warmboot and Fastboot Design Impact  
-Mention whether this feature/enhancement has got any requirements/dependencies/impact w.r.t. warmboot and fastboot. Ensure that existing warmboot/fastboot feature is not affected due to this design and explain the same.
+### 12. Warmboot and Fastboot Design Impact  
 
-### Warmboot and Fastboot Performance Impact
-This sub-section must cover the impact of the functionality on warmboot and fastboot performance, that is control plane and data plane downtime.
-As part of the analysis cover the flowing:
+Trusted ZTP runs only during initial provisioning (factory default or an explicit `ztp run`) and is not part of the warm or fast reboot data path. The reused client performs no background processing and holds no state outside a single bootstrap invocation, so warm-reboot compatibility is inherited automatically.
 
-- Does this feature add any stalls/sleeps/IO operations to the boot critical chain? Does it change when this feature is disabled/unused? 
-- Does this feature add any additional CPU heavy processing (e.g. rendering Jinja templates) in the boot path (process, library or utility used during boot up)? Does it change when this feature is disabled/unused?
-- In case this feature updates a third party dependency does it cause any impact on boot time performance?
-- Can the feature (service or docker) be delayed?
-- What are the possible optimizations and what is the expected boot time degradation if, by the nature of the feature, additional CPU/IO costs can't be avoided?
+| Event | Behaviour |
+|:------|:----------|
+| Warm reboot | The engine reads STATE_DB; if provisioning is complete it enters renewal-monitor mode (Phase 2). The client is not invoked. |
+| Fast reboot | Identical to warm reboot. |
+| Factory reset | STATE_DB is cleared and any LDevID is deleted (Phase 2); the IDevID and TPM state persist. Trusted ZTP re-runs on the next boot. |
+| Power loss during bootstrap | Because the design is fail-closed, nothing has been applied. On the next boot the reconciler (Phase 2) repairs any partial identity state and provisioning is retried. |
+| Reboot to install a boot image (during provisioning) | **Not** a warm/fast reboot. The secure-ZTP session is marked in-progress in `/host/ztp`, and on the next boot bootstrapping **restarts** on the new image and applies the configuration (§11.4). |
 
+---
 
 ### 11. Memory Consumption
 This sub-section covers the memory consumption analysis for the new feature: no memory consumption is expected when the feature is disabled via compilation and no growing memory consumption while feature is disabled by configuration. 
@@ -1084,6 +1115,17 @@ This sub-section covers the memory consumption analysis for the new feature: no 
 
 ### 12. Restrictions/Limitations  
 
+- **Requires a bootstrap server.** The mature server (Watsen) is proprietary; `google/open-sztp` is the open-source candidate but is young and needs an interoperability gate.
+- **Phase 1 device identity is file-based.** It relies on a pre-installed device certificate and operator-provisioned trust anchors; it does not establish identity from a hardware root of trust until Phase 2.
+- **ONIE residual attack window.** Trusted ZTP secures SONiC-userspace provisioning. The earlier ONIE-stage NOS image download remains unsecured until the proposed Phase 3.
+- **DHCPv6-only networks.** If only option 136 is available, client support must be confirmed; otherwise enforced mode may be restricted to dual-stack in Phase 1 .
+- **Reused client is written in Go.** SONiC invokes it as a subprocess, which adds a Go build and runtime artifact to the image.
+- **Phase-1 identity and trust plane are software-strength** — a per-unit file certificate and filesystem-protected trust plane. Hardware-rooted identity and a measured trust plane are Phase 2.
+- **Multi-ASIC and modular-chassis** provisioning (supervisor + line cards, per-ASIC namespaces) is not yet specified.
+- **Trust-anchor rotation** (expired or compromised vendor/operator CA) is not yet specified.
+- **Feature across image upgrade** — behaviour when a Trusted-ZTP-provisioned device is upgraded to an image without the feature (or vice-versa) is not yet specified.
+
+---
 
 ### 13. Testing Requirements/Design  
 Explain what kind of unit testing, system testing, regression testing, warmboot/fastboot testing, etc.,
