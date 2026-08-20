@@ -142,6 +142,7 @@ sequenceDiagram
 
     S->>C: config reload
 ```
+*Figure 1 — SONiC ZTP Initial Provisioning Sequence*
 
 The existing ZTP flow is functional but **insecure by default** i.e. **Zero touch** is **easy**, but **Zero trust** is the **hard part**. Its discovery relies on DHCP options transmitted in cleartext (DHCPv4 option 67 for the configuration URL, option 66 for a TFTP server, option 239 for a provisioning script; DHCPv6 option 59). It supports unauthenticated transports — HTTP, TFTP, and FTP — alongside HTTPS and SCP, and uses curl to download provisioning data.
 
@@ -210,6 +211,8 @@ sequenceDiagram
     Switch->>Switch: Run Scripts
     Switch-->>BootstrapServer: Report Outcome
 ```
+*Figure2 : Trusted SONiC Bootstrapping Sequence with Mutual TLS*
+
 ##### 01. Find the bootstrap server
 
 DHCP hands the switch a single thing: a **URL** (via option 143). Here DHCP is treated as *untrusted* — just a pointer, nothing more.
@@ -373,7 +376,8 @@ flowchart TB
 
     TZTP -. Phase 2 .-> TPM
 ```
-`
+
+*Figure 3 : Trusted ZTP mapped onto the standard SONiC architecture. The change is confined to the native ZTP service, the CLI, and two database tables; the SWSS / syncd / SAI / ASIC stack is untouched*
 
 ### 8. High-Level Design 
 
@@ -449,7 +453,7 @@ flowchart TB
     DHCP["DHCP opt 143/136"]:::io --> DISC["Discovery"]:::new
     TB --> DISC
     DISC --> ADP["SztpClientAdapter"]:::new
-    ADP --> AGT["sztp-agent<br/>(reused)"]:::reuse
+    ADP --> AGT["sztp-agent<br/>(3rd party opensource)"]:::new
     AGT <-->|"TLS"| BS["Bootstrap server<br/>(off-device)"]:::io
     AGT -->|"payload"| ADP
     ADP --> TA["TimeAnchor"]:::new
@@ -464,6 +468,7 @@ flowchart TB
     classDef reuse fill:#d6eaf8,stroke:#2471a3,color:#154360
     classDef io fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
 ```
+*Figure 4 : Trusted ZTP internal components and secure data flow. The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
 
 #### Component Responsibilities
 
@@ -584,6 +589,7 @@ flowchart TD
 
     Adapter -.-> note1
 ```
+*Figure 5: SZTP Client Adapter Architecture*
 
 `SztpClientAdapter` executes the `sztp-agent` client and translates the results into existing SONiC provisioning outcomes, so the existing handling simply works:
 
@@ -634,6 +640,7 @@ flowchart TD
     J --> M
     K --> N
 ```
+*Figure 6 : SztpClientAdapter Exit Code to SONiC Outcome Mapping*
 
 ##### 04. TimeAnchor
 **Type:** New 
@@ -767,6 +774,8 @@ sequenceDiagram
         end
     end
 ```
+*Figure 7: Applying a Validated SZTP Payload in SONiC*
+---
 
 ##### 06. AuditSink
 **Type:** New 
@@ -784,7 +793,7 @@ Manages hardware-based device identities stored in the TPM, including:
 It also handles secure certificate and key renewal operations while ensuring the private keys remain protected.
 
 ##### 08. sztp-agent
-**Type:** Reused (Go)
+**Type:** 3rd-party Open-source : Reused (Go)
 
 The existing RFC 8572 Secure Zero Touch Provisioning client responsible for:
 
@@ -834,7 +843,8 @@ flowchart TD
     K --> L
     K --> M
 ```
-
+*Figure 8: 3rd-party open-source SZTP-Agent Security Processing Architecture - RFC 8572 Secure Bootstrapping Processing Flow*
+---
 
 ##### 09. ztp-engine.py and Plugins
 **Type:** Reused (Python)
@@ -886,6 +896,9 @@ sequenceDiagram
         ZTP->>ZTP: Record Security Failure
     end
 ```
+
+*Figure 9: Complete End-to-End Provisioning Sequence with tZTP components*
+
 
 ### 8.3 Impacted SONiC Repositories
 The impact per repository and data store is summarised below.
@@ -939,8 +952,7 @@ flowchart TD
     classDef fail fill:#f5b7b1,stroke:#a93226,color:#641e16
 ```
 
-* Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy.*
-
+*Figure 10 : Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy*
 
 
 ### 8.5 Provisioning Workflow
@@ -979,6 +991,7 @@ sequenceDiagram
     ENG->>DB: status = SUCCESS + audit events
     AGT->>BS: progress report (bootstrap-complete)
 ```
+*Figure 11 : Successful voucher-anchored provisioning*
 
 **Step by step:**
 
@@ -1018,6 +1031,7 @@ sequenceDiagram
     ADP->>DB: status = FAILED-VALIDATION + reason
     Note over DISC,DB: No image, configuration, or script is applied.
 ```
+*Figure 12: Fail-closed behaviour on any trust failure*
 
 **Step by step:**
 
@@ -1053,6 +1067,7 @@ sequenceDiagram
     ENG->>DB: TZTP status = DISABLED, ZTP proceeds
     Note over TB,DB: identical to today's SONiC — no voucher, no mutual TLS
 ```
+*Figure 13: Legacy provisioning when the secure option is disabled*
 
 **Step by step:**
 
