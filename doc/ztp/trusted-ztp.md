@@ -774,8 +774,9 @@ sequenceDiagram
         end
     end
 ```
+
 *Figure 7: Applying a Validated SZTP Payload in SONiC*
----
+
 
 ##### 06. AuditSink
 **Type:** New 
