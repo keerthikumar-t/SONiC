@@ -19,7 +19,16 @@
 6. [Requirements](#6-requirements)
 7. [Architecture](#7-architecture)
 8. [High-Level Design](#8-high-level-design)
+9. [SAI API](#9-sai-api)
+10. [Implementation Phasing](#10-implementation-phasing)
+11. [Configuration and Management](#11-configuration-and-management)
+12. [Warmboot and Fastboot Design Impact](#12-warmboot-and-fastboot-design-impact)
+13. [Memory Consumption](#13-memory-consumption)
+14. [Restrictions/Limitations](#14-restrictions-/-limitations)
+15. [Testing Requirements](#15-testing-requirements)
+16. [Open/Action items](#16-open-/-action-items)
 
+	
 ### 1. Revision History  
 
 | Version | Date | Author | Description |
@@ -1069,20 +1078,110 @@ The work is delivered in phases so that Phase 1 provides real security on today'
 |:-----:|:----------|:------------|:---------------------|:----------------|
 | **1** | Trusted ZTP in SONiC userspace | Voucher and certificate (file-based identity) | None — runs today | This HLD |
 | **2** | Hardware-rooted identity | TPM 2.0 and IEEE 802.1AR IDevID/LDevID with EST | TPM and factory IDevID ([O3](#20-open-items)) | Follow-up HLD |
-| **3** | Close the ONIE image-download window | Authenticated NOS image retrieval | ONIE support | Future (opencomputeproject/onie) |
+| **Out Of Scope** | Close the ONIE image-download window | Authenticated NOS image retrieval | ONIE support | Future (opencomputeproject/onie) |
 
-Phases 1 and 2 deepen the *trust model*; Phase 3 widens *coverage* to the pre-SONiC boot stage. They are independent and may proceed in parallel.
+Phases 1 and 2 deepen the *trust model*; OutOfPhase work item widens *coverage* to the pre-SONiC boot stage. They are independent and may proceed in parallel.
 
 ---
 
 
 ### 11. Configuration and management 
-This section should have sub-sections for all types of configuration and management related design. Example sub-sections for "CLI" and "Config DB" are given below. Sub-sections related to data models (YANG, REST, gNMI, etc.,) should be added as required.
-If there is breaking change which may impact existing platforms, please call out in the design and get platform vendors reviewed. 
 
-#### 11.1. Manifest (if the feature is an Application Extension)
+#### 11.1.  Runtime Configuration
 
-Paste a preliminary manifest in a JSON format.
+Trusted ZTP runtime configuration extends the first-boot trust configuration and adds operational controls that can be managed after deployment.
+
+The configuration is modeled using YANG and stored in `CONFIG_DB`. The final storage location is still under discussion and may either use a dedicated `TZTP` table or extend the existing ZTP configuration framework.
+
+##### Example Configuration
+
+```json
+{
+  "tztp": {
+    "trusted_mode": true,
+    "enforce": true,
+    "trust_model": "voucher-anchored",
+    "require_ownership_voucher": true,
+    "tls_minimum_version": "TLSv1.3",
+    "identity_source": "file",
+    "enrollment_retry_count": 3,
+    "enrollment_retry_delay_sec": 30,
+    "allow_unsigned_fallback": false
+  }
+}
+```
+##### Configuration Parameters
+
+| Parameter | Default Value | Description |
+|------------|---------------|-------------|
+| `trusted_mode` | `false` | Master switch for Trusted ZTP. When disabled, the device operates using legacy SONiC ZTP only. |
+| `enforce` | `false` | Enables secure-only onboarding. When enabled, legacy discovery methods and insecure transports are disabled, and onboarding follows a fail-closed model. |
+| `trust_model` | `voucher-anchored` | Defines the trust establishment mechanism. Supported values are `voucher-anchored` and `trusted-server`. |
+| `require_ownership_voucher` | `true` | Requires a valid ownership voucher during onboarding. Cannot be disabled when Trusted ZTP is enabled. |
+| `dhcp_option_source` | `option_143` | Specifies the DHCP option used for bootstrap server discovery. `option_67` is not allowed when Trusted ZTP is enabled. |
+| `tls_minimum_version` | `TLSv1.3` | Defines the minimum TLS version permitted for secure communications. TLS 1.2 and earlier versions are rejected. |
+| `identity_source` | `file` | Specifies the source of device identity credentials. Supported values are `file` (Phase 1) and `tpm` (Phase 2). |
+| `allow_file_based_idevid` | `true` | Determines whether file-based IDevID credentials are allowed. Set to `false` to require TPM-backed device identity. |
+| `enrollment_retry_count` | `3` | Maximum number of retries for onboarding operations that return a retryable (`SUSPEND`) status. |
+| `enrollment_retry_delay_sec` | `30` | Delay, in seconds, between enrollment retry attempts. |
+| `trusted_time` | `voucher-anchored` | Defines the clock-handling policy when the device boots without a valid system time. Supported values include `strict`, `voucher-anchored`, and `ntp-first`. |
+| `tpm_idevid_handle` | `0x81010001` | TPM persistent handle used to store the Initial Device Identity (IDevID). Available in Phase 2 deployments. |
+| `tpm_ldevid_handle` | `0x81010002` | TPM persistent handle used for the active Local Device Identity (LDevID). Available in Phase 2 deployments. |
+| `tpm_ldevid_staging_handle` | `0x81010003` | Temporary TPM handle used during crash-safe LDevID renewal operations. Available in Phase 2 deployments. |
+| `ldevid_renewal_before_expiry_days` | `90` | Number of days before certificate expiry when LDevID renewal should be initiated. |
+| `allow_onboarding_scripts` | `false` | Controls execution of RFC 8572 onboarding scripts. When disabled, onboarding is limited to configuration-only operations. |
+| `mgmt_vrf` | `default` | Specifies the VRF used for Trusted ZTP communication sessions. Common values include `default` and `mgmt`. |
+| `discovery_interfaces` | `auto` | Defines the interfaces used for bootstrap server discovery. If not specified, interfaces are selected automatically. |
+
+#### Configuration Source of Truth and Precedence
+
+Trusted ZTP configuration can originate from two sources:
+
+| Source | Purpose |
+|----------|----------|
+| `bootstrap.json` (Factory Trust Plane) | Loaded during first boot before `CONFIG_DB` exists. Defines the device's initial trust posture and security controls. |
+| `CONFIG_DB (TZTP \ global)` | Runtime configuration used after onboarding. Managed through CLI, gNMI, or management frameworks. |
+
+#### Security-Critical Settings
+
+The following parameters are considered security-critical and are controlled by the factory trust plane:
+
+- `enforce`
+- `trust_model`
+- `require_ownership_voucher`
+- Trust anchors and associated trust material
+
+Runtime configuration **cannot weaken** these settings. It may only make the security posture **more restrictive**.
+
+##### Example
+
+A device shipped with:
+
+```json
+{
+  "enforce": true
+}
+```
+
+cannot later be changed through `CONFIG_DB` to:
+
+```json
+{
+  "enforce": false
+}
+```
+
+This prevents accidental or malicious security downgrades.
+
+#### Operational Parameters
+
+The following settings may be freely modified through `CONFIG_DB` because they do not affect the underlying trust model:
+
+- Retry counts
+- Retry delays
+- LDevID renewal schedules
+- Static bootstrap server lists
+- Discovery interface preferences
 
 #### 11.2. CLI/YANG model Enhancements 
 
@@ -1109,11 +1208,11 @@ Trusted ZTP runs only during initial provisioning (factory default or an explici
 
 ---
 
-### 11. Memory Consumption
+### 13. Memory Consumption
 This sub-section covers the memory consumption analysis for the new feature: no memory consumption is expected when the feature is disabled via compilation and no growing memory consumption while feature is disabled by configuration. 
 
 
-### 12. Restrictions/Limitations  
+### 14. Restrictions/Limitations  
 
 - **Requires a bootstrap server.** The mature server (Watsen) is proprietary; `google/open-sztp` is the open-source candidate but is young and needs an interoperability gate.
 - **Phase 1 device identity is file-based.** It relies on a pre-installed device certificate and operator-provisioned trust anchors; it does not establish identity from a hardware root of trust until Phase 2.
@@ -1127,17 +1226,46 @@ This sub-section covers the memory consumption analysis for the new feature: no 
 
 ---
 
-### 13. Testing Requirements/Design  
-Explain what kind of unit testing, system testing, regression testing, warmboot/fastboot testing, etc.,
-Ensure that the existing warmboot/fastboot requirements are met. For example, if the current warmboot feature expects maximum of 1 second or zero second data disruption, the same should be met even after the new feature/enhancement is implemented. Explain the same here.
-Example sub-sections for unit test cases and system test cases are given below. 
+### 15. Testing Requirements/Design  
 
-#### 13.1. Unit Test cases  
+#### 15.1. Unit Test cases  
+Unit tests run with the client mocked, so they require no live TPM, network, or bootstrap server (NFR-6).
 
-#### 13.2. System Test cases
+| ID | Area | Verifies |
+|:---|:-----|:---------|
+| UT-1 | TrustBootstrap | Missing or invalid `bootstrap.json` with `enforce=true` fails closed; legacy ZTP is not started |
+| UT-2 | Discovery | Option 143/136 parsed correctly; option 67 rejected in enforced mode |
+| UT-3 | SztpClientAdapter | Exit codes 0/2/other map to SUCCESS/SUSPEND/FAILED; typed errors surfaced |
+| UT-4 | SztpClientAdapter | A client version outside the pinned range halts with `CLIENT_VERSION_MISMATCH` |
+| UT-5 | PayloadMapper | Onboarding payload maps to the correct provisioning sections |
+| UT-6 | TimeAnchor | An invalid clock is anchored to the voucher `created-on` timestamp |
+| UT-7 | Config apply | An apply failure restores the backup |
+| UT-8 | AuditSink | Each outcome writes both a STATE_DB entry and a system-log record |
+| UT-9 | YANG | Insecure configuration combinations are rejected by the model |
 
 
-### 14. Open/Action items - if any 
+#### 15.2. Functional and Integration Test cases
+
+| ID | Scenario | Expected outcome |
+|:---|:---------|:-----------------|
+| FT-1 | Valid voucher and configuration (both trust models) | SUCCESS; configuration applied |
+| FT-2 | Invalid or expired voucher | FAILED; nothing applied |
+| FT-3 | Incorrect owner certificate | FAILED |
+| FT-4 | Tampered CMS signature | FAILED; existing configuration preserved |
+| FT-5 | Server certificate not chaining to the trust anchor (trusted-server model) | Aborts at TLS; FAILED |
+| FT-6 | Redirect chain (server A → server B) | Redirect followed; SUCCESS |
+| FT-7 | Bootstrap server temporarily unreachable | SUSPEND, then SUCCESS on recovery |
+| FT-8 | Enforced mode with a legacy option-67 offer present | Legacy ignored; secure path only |
+| FT-9 | `trusted_mode=false` | Legacy ZTP unchanged (regression guard) |
+| FT-10 | Clock-less boot (invalid RTC) | Time anchored; validation succeeds |
+| FT-11 | Server offering only TLS 1.2 | Rejected; FAILED |
+| FT-12 | Payload names a new boot image | Image installed, device reboots, bootstrapping restarts and applies config (§11.4) |
+| FT-13 | Replayed or expired voucher (valid signature, stale nonce/`expires-on`) | FAILED; nothing applied |
+| FT-14 | Malformed or oversized voucher/payload | Rejected cleanly; FAILED; no crash |
+| FT-15 | Clock-less boot in voucher-anchored mode (server cert `notBefore` in the past) | TLS proceeds with relaxed expiry, voucher validated, time anchored; SUCCESS |
+
+
+### 16. Open/Action items - if any 
 
 	
 NOTE: All the sections and sub-sections given above are mandatory in the design document. Users can add additional sections/sub-sections if required.
