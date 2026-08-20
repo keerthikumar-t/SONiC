@@ -1084,7 +1084,6 @@ Phases 1 and 2 deepen the *trust model*; OutOfPhase work item widens *coverage* 
 
 ---
 
-
 ### 11. Configuration and management 
 
 #### 11.1.  Runtime Configuration
@@ -1105,12 +1104,14 @@ The configuration is modeled using YANG and stored in `CONFIG_DB`. The final sto
     "tls_minimum_version": "TLSv1.3",
     "identity_source": "file",
     "enrollment_retry_count": 3,
-    "enrollment_retry_delay_sec": 30,
-    "allow_unsigned_fallback": false
+    "enrollment_retry_delay_sec": 30
   }
 }
 ```
-##### Configuration Parameters
+---
+
+#### 11.2. Config DB Enhancements : The complete field set (CONFIG_DB TZTP|global):
+
 
 | Parameter | Default Value | Description |
 |------------|---------------|-------------|
@@ -1133,7 +1134,7 @@ The configuration is modeled using YANG and stored in `CONFIG_DB`. The final sto
 | `mgmt_vrf` | `default` | Specifies the VRF used for Trusted ZTP communication sessions. Common values include `default` and `mgmt`. |
 | `discovery_interfaces` | `auto` | Defines the interfaces used for bootstrap server discovery. If not specified, interfaces are selected automatically. |
 
-#### Configuration Source of Truth and Precedence
+##### Configuration Source of Truth and Precedence
 
 Trusted ZTP configuration can originate from two sources:
 
@@ -1142,38 +1143,8 @@ Trusted ZTP configuration can originate from two sources:
 | `bootstrap.json` (Factory Trust Plane) | Loaded during first boot before `CONFIG_DB` exists. Defines the device's initial trust posture and security controls. |
 | `CONFIG_DB (TZTP \ global)` | Runtime configuration used after onboarding. Managed through CLI, gNMI, or management frameworks. |
 
-#### Security-Critical Settings
 
-The following parameters are considered security-critical and are controlled by the factory trust plane:
-
-- `enforce`
-- `trust_model`
-- `require_ownership_voucher`
-- Trust anchors and associated trust material
-
-Runtime configuration **cannot weaken** these settings. It may only make the security posture **more restrictive**.
-
-##### Example
-
-A device shipped with:
-
-```json
-{
-  "enforce": true
-}
-```
-
-cannot later be changed through `CONFIG_DB` to:
-
-```json
-{
-  "enforce": false
-}
-```
-
-This prevents accidental or malicious security downgrades.
-
-#### Operational Parameters
+##### Operational Parameters
 
 The following settings may be freely modified through `CONFIG_DB` because they do not affect the underlying trust model:
 
@@ -1183,17 +1154,467 @@ The following settings may be freely modified through `CONFIG_DB` because they d
 - Static bootstrap server lists
 - Discovery interface preferences
 
-#### 11.2. CLI/YANG model Enhancements 
+---
 
-This sub-section covers the addition/deletion/modification of CLI changes and YANG model changes needed for the feature in detail. If there is no change in CLI for HLD feature, it should be explicitly mentioned in this section. Note that the CLI changes should ensure downward compatibility with the previous/existing CLI. i.e. Users should be able to save and restore the CLI from previous release even after the new CLI is implemented. 
-This should also explain the CLICK and/or KLISH related configuration/show in detail.
-https://github.com/sonic-net/sonic-utilities/blob/master/doc/Command-Reference.md needs be updated with the corresponding CLI change.
+#### 11.3 YANG model Enhancements 
 
-#### 11.3. Config DB Enhancements  
+The complete model, `sonic-tztp.yang`, describes the CONFIG_DB `TZTP|global` table. Its design goal is that an insecure configuration is not merely discouraged but **unrepresentable**: the `must` statements reject any attempt to weaken security while `trusted_mode` is enabled, the `https-uri` type forbids non-TLS servers, and the Phase-2 identity leaves are gated with `when "../identity_source = 'tpm'"` so they exist only when relevant.
 
-This sub-section covers the addition/deletion/modification of config DB changes needed for the feature. If there is no change in configuration for HLD feature, it should be explicitly mentioned in this section. This section should also ensure the downward compatibility for the change. 
+```yang
+module sonic-tztp {
 
-		
+    yang-version 1.1;
+    namespace "http://github.com/sonic-net/sonic-tztp";
+    prefix tztp;
+
+    organization "SONiC";
+    contact      "SONiC ZTP / Security Working Group";
+
+    description
+      "Trusted ZTP (RFC 8572 Secure Zero Touch Provisioning) configuration for
+       SONiC. Models the CONFIG_DB TZTP|global table. The 'must' constraints make
+       an insecure configuration unrepresentable while trusted_mode is enabled.";
+
+    revision 2026-08-06 {
+        description "Initial revision.";
+        reference  "RFC 8572; RFC 8366; RFC 7030; IEEE 802.1AR.";
+    }
+
+    /* ------------------------------- typedefs ------------------------------- */
+
+    typedef tpm-handle {
+        type string {
+            pattern '0x[0-9A-Fa-f]{8}';
+        }
+        description "A TPM 2.0 persistent object handle, e.g. 0x81010001.";
+    }
+
+    typedef https-uri {
+        type string {
+            length  "1..1024";
+            pattern 'https://.*';
+        }
+        description "An https:// URL. Non-TLS schemes are not permitted.";
+    }
+
+    /* --------------------------------- data --------------------------------- */
+
+    container sonic-tztp {
+      container TZTP {
+        container global {
+
+          description
+            "Global Trusted ZTP configuration (CONFIG_DB key TZTP|global).";
+
+          /* ----- master switches ----- */
+
+          leaf trusted_mode {
+              type boolean;
+              default false;
+              description
+                "Master switch. When false (default) the device runs the existing
+                 legacy ZTP unchanged.";
+          }
+
+          leaf enforce {
+              type boolean;
+              default false;
+              description
+                "When true, secure-only: legacy option-67/239 discovery and
+                 unauthenticated transports are disabled and any missing trust
+                 material or failed check fails closed. When false (transition mode)
+                 the device may fall back to legacy ZTP if the secure path cannot be
+                 attempted.";
+          }
+
+          /* ----- trust model ----- */
+
+          leaf trust_model {
+              type enumeration {
+                  enum "trusted-server";
+                  enum "voucher-anchored";
+              }
+              default "voucher-anchored";
+              description
+                "RFC 8572 trust model. 'trusted-server' validates the server
+                 certificate against a factory-pinned CA; 'voucher-anchored'
+                 (RFC 8572 section 5.4) verifies the server via the ownership voucher.";
+          }
+
+          leaf require_ownership_voucher {
+              type boolean;
+              default true;
+              must "not(. = 'false' and ../trusted_mode = 'true')" {
+                  error-message
+                    "require_ownership_voucher cannot be disabled while trusted_mode is true";
+              }
+              description "Require a valid RFC 8366 ownership voucher.";
+          }
+
+          /* ----- discovery and transport ----- */
+
+          leaf dhcp_option_source {
+              type enumeration {
+                  enum "option_143";   // DHCPv4 SZTP redirect
+                  enum "option_136";   // DHCPv6 SZTP redirect
+                  enum "option_67";    // legacy DHCPv4 config URL
+              }
+              default "option_143";
+              must "not(. = 'option_67' and ../trusted_mode = 'true')" {
+                  error-message
+                    "option_67 is not permitted while trusted_mode is true";
+              }
+              description "Where the bootstrap-server / redirect URI is read from.";
+          }
+
+          leaf-list static_servers {
+              type https-uri;
+              description
+                "Static bootstrap-server URLs, used when DHCP discovery is not
+                 available. Tried in order; RFC 8572 redirects are honoured.";
+          }
+
+          leaf tls_minimum_version {
+              type enumeration {
+                  enum "TLSv1.2";
+                  enum "TLSv1.3";
+              }
+              default "TLSv1.3";
+              description "Minimum TLS version; lower versions are rejected.";
+          }
+
+          leaf allow_unsigned_fallback {
+              type boolean;
+              default false;
+              must "not(. = 'true' and ../trusted_mode = 'true')" {
+                  error-message
+                    "allow_unsigned_fallback is prohibited while trusted_mode is true";
+              }
+              description
+                "Test/lab only. Permit applying an unsigned payload. Forbidden in
+                 trusted_mode.";
+          }
+
+          /* ----- device identity ----- */
+
+          leaf identity_source {
+              type enumeration {
+                  enum "file";   // Phase 1
+                  enum "tpm";    // Phase 2
+              }
+              default "file";
+              description "Source of the device client certificate and key.";
+          }
+
+          leaf allow_file_based_idevid {
+              type boolean;
+              default true;
+              must "not(. = 'false' and ../identity_source = 'file')" {
+                  error-message
+                    "identity_source must be 'tpm' when allow_file_based_idevid is false";
+              }
+              description
+                "When false, forbids file-based identity (identity_source must be
+                 'tpm'). Operators on TPM-capable hardware set this false to require
+                 the hardware-rooted identity.";
+          }
+
+          /* ----- retry policy ----- */
+
+          leaf enrollment_retry_count {
+              type uint8 { range "1..10"; }
+              default 3;
+              description "Attempts for a retryable (SUSPEND) outcome.";
+          }
+
+          leaf enrollment_retry_delay_sec {
+              type uint32 { range "5..300"; }
+              default 30;
+              description "Delay between retries, in seconds.";
+          }
+
+          /* ----- trusted time ----- */
+
+          leaf trusted_time {
+              type enumeration {
+                  enum "strict";            // require a valid clock
+                  enum "voucher-anchored";  // anchor to voucher created-on
+                  enum "ntp-first";         // attempt NTP before validating
+              }
+              default "voucher-anchored";
+              description "Clock policy for a clock-less first boot.";
+          }
+
+          /* ----- trust material ----- */
+
+          leaf vendor_ca_bundle {
+              type string { length "1..256"; }
+              default "/etc/sonic/tztp/trust/vendor-ca.pem";
+              description "Vendor CA bundle used to validate the ownership voucher.";
+          }
+
+          leaf operator_ca_bundle {
+              type string { length "1..256"; }
+              default "/etc/sonic/tztp/trust/operator-ca.pem";
+              description
+                "Operator CA bundle used to validate the server (trusted-server model).";
+          }
+
+          /* ----- reused client pin ----- */
+
+          leaf sztp_client {
+              type string { length "1..64"; }
+              default "sztp-agent";
+              description "Name of the packaged RFC 8572 client.";
+          }
+
+          leaf sztp_client_version_range {
+              type string { length "1..64"; }
+              description
+                "Accepted client version range, e.g. '>=0.2.0,<0.3.0'. A client outside
+                 this range fails the session (CLIENT_VERSION_MISMATCH).";
+          }
+
+          /* ----- Phase 2: TPM-backed identity ----- */
+
+          leaf tpm_idevid_handle {
+              when "../identity_source = 'tpm'";
+              type tpm-handle;
+              default "0x81010001";
+              description "Phase 2. Persistent TPM handle for the IDevID key.";
+          }
+
+          leaf tpm_ldevid_handle {
+              when "../identity_source = 'tpm'";
+              type tpm-handle;
+              default "0x81010002";
+              description "Phase 2. Active LDevID key handle.";
+          }
+
+          leaf tpm_ldevid_staging_handle {
+              when "../identity_source = 'tpm'";
+              type tpm-handle;
+              default "0x81010003";
+              description "Phase 2. Staging handle for crash-safe LDevID renewal.";
+          }
+
+          leaf ldevid_renewal_before_expiry_days {
+              type uint16 { range "1..365"; }
+              default 90;
+              description "Phase 2. Renew the LDevID this many days before expiry.";
+          }
+
+          leaf allow_onboarding_scripts {
+              type boolean;
+              default false;
+              description
+                "Permit execution of RFC 8572 pre/post-configuration scripts, which
+                 run with root privilege. When false, only configuration is applied.";
+          }
+        }
+      }
+    }
+}
+```
+
+##### Security Invariants Enforced by the Configuration Model
+
+| Security Invariant | Description |
+|-------------------|-------------|
+| **No insecure discovery in secure mode** | When `trusted_mode` is enabled, the legacy DHCP discovery option `option_67` cannot be configured. Only secure discovery mechanisms are allowed. |
+| **No unsigned payloads** | When `trusted_mode` is enabled, `allow_unsigned_fallback` cannot be set to `true`. All provisioning payloads must be cryptographically verified. |
+| **Ownership vouchers are mandatory** | When `trusted_mode` is enabled, `require_ownership_voucher` cannot be disabled. A valid ownership voucher is always required to establish device ownership. |
+| **Hardware-backed identity can be enforced** | Setting `allow_file_based_idevid = false` requires `identity_source = tpm`, ensuring that device identity credentials are stored and protected by TPM hardware. |
+| **Modern TLS only** | The minimum TLS version defaults to `TLSv1.3`, and bootstrap server definitions (`static_servers`) must use `https://` URLs, preventing the use of insecure transport protocols. |
+
+
+**Important Security Note**
+
+> **YANG provides configuration validation, not a runtime security boundary.**
+
+The YANG model enforces these constraints only through the **management interfaces**, such as:
+
+- CLI
+- gNMI
+- Other management-framework APIs
+
+This provides:
+
+- Early validation of configuration changes
+- Protection against accidental misconfiguration
+- A clear and consistent operational contract for administrators
+
+However, `CONFIG_DB` is implemented using Redis. A component with direct access to the datastore could theoretically bypass YANG validation and write invalid or insecure values directly into the database.
+
+
+#### Actual Runtime Security Enforcement
+
+The effective runtime security posture is enforced by the Trusted ZTP runtime components, specifically:
+
+- `TrustBootstrap`
+- Trusted ZTP engine
+- Factory trust plane (`bootstrap.json`)
+
+The factory trust plane remains the authoritative source for security-critical settings, including:
+
+- Trust anchors
+- Enforcement mode
+- Ownership voucher requirements
+- Trust model selection
+
+Runtime configuration stored in `CONFIG_DB` is **not permitted to weaken** these settings. It may only maintain or strengthen the security posture established during manufacturing.
+
+This ensures that a device shipped in a secure configuration cannot be silently downgraded by:
+
+- Misconfiguration
+- Unauthorized configuration changes
+- Direct datastore manipulation
+
+---
+
+#### 11.4. Operational State DB Enhancements (STATE_DB)  
+
+
+Operational visibility is provided by a new STATE_DB table, `TZTP|status`, which does not exist for legacy ZTP:
+
+| Field | Description |
+|:------|:------------|
+| `state` | `IN-PROGRESS`, `SUCCESS`, `FAILED-VALIDATION`, `SUSPEND`, or `DISABLED` |
+| `trust_model` | `trusted-server` or `voucher-anchored` |
+| `bootstrap_server` | The server that provided the onboarding information |
+| `voucher_valid` | Whether the ownership voucher validated |
+| `server_verified` | Whether the server was authenticated |
+| `owner_subject` | Subject of the validated owner certificate |
+| `sztp_client` / `sztp_client_version` | The reused client and its version |
+| `client_provision_result` | `OK`, or the typed error (`MTLS_FAIL`, `VOUCHER_FAIL`, `CMS_FAIL`, `VERSION_MISMATCH`) |
+| `clock_policy` | Trusted-time policy applied on this boot|
+| `ldevid_issued` | (Phase 2) whether an LDevID was enrolled |
+| `ldevid_expiry` | (Phase 2) LDevID expiry, ISO-8601 |
+| `last_error` | Populated on failure |
+| `timestamp` | ISO-8601 time of the last transition |
+
+* The ISO-8601 standard formats date and time from largest to smallest units, using a 24-hour clock and a "T" separator
+* Example: 2026-08-20T10:30:00Z, where Z means UTC
+
+**Durable Audit Trail**
+
+Each phase transition writes both a STATE_DB audit entry (`TZTP_AUDIT|{timestamp}|{event}`) and a system-log record tagged `tztp`. The main events are:
+
+| Event | Trigger |
+|:------|:--------|
+| `MTLS_HANDSHAKE_OK` / `FAIL` | TLS mutual-authentication result |
+| `VOUCHER_VERIFY_OK` / `FAIL` | Ownership-voucher (RFC 8366) validation result |
+| `CMS_VERIFY_OK` / `FAIL` | Payload signature validation result |
+| `EST_ENROLL_OK` / `FAIL` | (Phase 2) LDevID enrollment via EST |
+| `CONFIG_APPLY_OK` / `FAIL` | Configuration apply / rollback result |
+| `TRUST_FALLBACK_LEGACY` | Transition-mode fallback to legacy taken (§11.5) |
+| `TRUST_DOWNGRADE_BLOCKED` | Enforced mode blocked a legacy fallback |
+| `CLIENT_VERSION_MISMATCH` | Installed client is outside the pinned version range |
+
+---
+
+#### 11.5. CLI
+
+Trusted ZTP adds commands to SONiC's standard Click-based CLI, provided by `sonic-utilities`. They fall into two groups: **`show tztp *`** commands are read-only, read from STATE_DB, and are available to any user; **`config tztp *`** commands modify CONFIG_DB and require administrative (root) privilege. All commands are no-ops when the feature is compiled out, and the `config` commands are rejected by the YANG model if they would create an insecure combination (§13.2).
+
+| Command | Type | Purpose |
+|:--------|:-----|:--------|
+| `show tztp status [--json]` | show | Current provisioning status and trust results |
+| `show tztp client` | show | Reused SZTP client name, version, and pin check |
+| `show tztp audit [--last <n>]` | show | Recent audit events |
+| `config tztp enable \| disable` | config | Turn Trusted ZTP on or off (`trusted_mode`) |
+| `config tztp enforce (true \| false)` | config | Set secure-only enforcement (`enforce`) |
+| `config tztp server add \| del <url>` | config | Manage the static bootstrap-server list |
+
+##### `show tztp status [--json]`
+
+**Description.** Displays the current Trusted ZTP state — the mode, the trust model in use, the bootstrap server contacted, the outcome of voucher and server validation, the reused client version, and the overall result. Reads `STATE_DB TZTP|status` (§13.3).
+
+**Options.** `--json` — emit machine-readable JSON instead of the formatted table (for automation and telemetry collectors).
+
+**Example.**
+
+```
+admin@sonic:~$ show tztp status
+Trusted ZTP      : enabled (enforce = true)
+Trust model      : voucher-anchored
+Bootstrap server : https://bootstrap.example.net
+Voucher valid    : true
+Server verified  : true
+Owner            : CN=example-owner
+SZTP client      : sztp-agent 0.2.0  (pinned >=0.2.0,<0.3.0, OK)
+Status           : SUCCESS
+```
+
+##### `show tztp client`
+
+**Description.** Displays the reused RFC 8572 client that is packaged in the image, its installed version, the version range pinned in the trust plane, and whether the installed version satisfies that pin. Useful for verifying that a build carries the expected, audited client (§13.7). A `Version OK : false` here corresponds to the `CLIENT_VERSION_MISMATCH` audit event and a failed provisioning run.
+
+**Example.**
+
+```
+admin@sonic:~$ show tztp client
+Client         : sztp-agent
+Installed      : 0.2.0
+Pinned range   : >=0.2.0,<0.3.0
+Version OK     : true
+```
+
+##### `show tztp audit [--last <n>]`
+
+**Description.** Displays the durable Trusted ZTP audit trail from `STATE_DB TZTP_AUDIT|*` (§13.4), newest last. Each row is one phase transition. This is the first place to look when diagnosing a failed or fallen-back provisioning attempt.
+
+**Options.** `--last <n>` — limit the output to the most recent `n` events (default: all events for the current session).
+
+**Example.**
+
+```
+admin@sonic:~$ show tztp audit --last 5
+TIMESTAMP             EVENT                DETAIL
+2026-08-01T10:15:02Z  MTLS_HANDSHAKE_OK    bootstrap.example.net
+2026-08-01T10:15:03Z  VOUCHER_VERIFY_OK    owner CN=example-owner
+2026-08-01T10:15:03Z  CMS_VERIFY_OK        -
+2026-08-01T10:15:07Z  CONFIG_APPLY_OK      -
+2026-08-01T10:15:07Z  STATUS               SUCCESS
+```
+
+##### `config tztp enable | disable`
+
+**Description.** Sets `trusted_mode` in CONFIG_DB to `true` (`enable`) or `false` (`disable`). `disable` returns the switch to the exact legacy ZTP behaviour (§11.5). Because `trusted_mode` normally originates from the factory trust plane, this command is intended for lab bring-up and controlled re-provisioning rather than day-to-day operation.
+
+**Example.**
+
+```
+admin@sonic:~$ sudo config tztp enable
+Trusted ZTP enabled. Run 'config tztp enforce true' to disable legacy fallback.
+```
+
+##### `config tztp enforce (true | false)`
+
+**Description.** Sets the `enforce` flag. `true` selects secure-only operation: legacy option-67/239 discovery and the unauthenticated HTTP/TFTP/FTP transports are disabled, and any missing trust material or failed check fails closed. `false` selects transition mode, which permits fallback to legacy ZTP when the secure path cannot be attempted (§11.5). Has no effect unless `trusted_mode` is enabled.
+
+**Example.**
+
+```
+admin@sonic:~$ sudo config tztp enforce true
+Enforce mode ON: legacy discovery and unauthenticated transports are now disabled.
+```
+
+##### `config tztp server add | del <url>`
+
+**Description.** Adds or removes a static bootstrap-server URL in the `static_servers` list, used when DHCP option 143/136 discovery is not available. The `<url>` must be `https://` (the YANG model rejects non-TLS URLs). Multiple servers may be configured; they are tried in order and honour RFC 8572 redirects.
+
+**Arguments.** `<url>` — the bootstrap server URL, e.g. `https://bootstrap.example.net`.
+
+**Example.**
+
+```
+admin@sonic:~$ sudo config tztp server add https://bootstrap.example.net
+admin@sonic:~$ sudo config tztp server del https://old-server.example.net
+```
+
+---
+
 ### 12. Warmboot and Fastboot Design Impact  
 
 Trusted ZTP runs only during initial provisioning (factory default or an explicit `ztp run`) and is not part of the warm or fast reboot data path. The reused client performs no background processing and holds no state outside a single bootstrap invocation, so warm-reboot compatibility is inherited automatically.
@@ -1209,14 +1630,15 @@ Trusted ZTP runs only during initial provisioning (factory default or an explici
 ---
 
 ### 13. Memory Consumption
-This sub-section covers the memory consumption analysis for the new feature: no memory consumption is expected when the feature is disabled via compilation and no growing memory consumption while feature is disabled by configuration. 
+To Be Updated. 
 
+---
 
 ### 14. Restrictions/Limitations  
 
 - **Requires a bootstrap server.** The mature server (Watsen) is proprietary; `google/open-sztp` is the open-source candidate but is young and needs an interoperability gate.
 - **Phase 1 device identity is file-based.** It relies on a pre-installed device certificate and operator-provisioned trust anchors; it does not establish identity from a hardware root of trust until Phase 2.
-- **ONIE residual attack window.** Trusted ZTP secures SONiC-userspace provisioning. The earlier ONIE-stage NOS image download remains unsecured until the proposed Phase 3.
+- **ONIE residual attack window.** Trusted ZTP secures SONiC-userspace provisioning. The earlier ONIE-stage NOS image download remains unsecured. This is currently out-of-scope of this proposal.
 - **DHCPv6-only networks.** If only option 136 is available, client support must be confirmed; otherwise enforced mode may be restricted to dual-stack in Phase 1 .
 - **Reused client is written in Go.** SONiC invokes it as a subprocess, which adds a Go build and runtime artifact to the image.
 - **Phase-1 identity and trust plane are software-strength** — a per-unit file certificate and filesystem-protected trust plane. Hardware-rooted identity and a measured trust plane are Phase 2.
@@ -1264,8 +1686,7 @@ Unit tests run with the client mocked, so they require no live TPM, network, or 
 | FT-14 | Malformed or oversized voucher/payload | Rejected cleanly; FAILED; no crash |
 | FT-15 | Clock-less boot in voucher-anchored mode (server cert `notBefore` in the past) | TLS proceeds with relaxed expiry, voucher validated, time anchored; SUCCESS |
 
+---
 
 ### 16. Open/Action items - if any 
-
-	
-NOTE: All the sections and sub-sections given above are mandatory in the design document. Users can add additional sections/sub-sections if required.
+To Be Updated
