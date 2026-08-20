@@ -40,7 +40,7 @@
 
 This High Level Design (HLD) proposes **Trusted ZTP (tZTP)** — a standards-based, cryptographically secured onboarding capability for SONiC based on **RFC 8572 (Secure Zero Touch Provisioning)**.
 
-The design is intentionally conservative: it **augments** the existing `sonic-ztp` service rather than replacing it, **reuses** a mature, permissively licensed RFC 8572 implementation rather than writing the security-critical protocol from scratch, and remains **disabled by default** so that existing deployments are unaffected. The recommendations for which open-source components to adopt are backed by primary-source repository data (summarised in [Appendix A](#appendix-a-primary-source-evidence)), not vendor marketing claims.
+The design is intentionally conservative: it **augments** the existing `sonic-ztp` service rather than replacing it, **reuses** a mature, permissively licensed RFC 8572 implementation rather than writing the security-critical protocol from scratch, and remains **disabled by default** so that existing deployments are unaffected.
 
 
 ### 3. Scope  
@@ -1535,11 +1535,9 @@ Trusted ZTP adds commands to SONiC's standard Click-based CLI, provided by `soni
 | Command | Type | Purpose |
 |:--------|:-----|:--------|
 | `show tztp status [--json]` | show | Current provisioning status and trust results |
-| `show tztp client` | show | Reused SZTP client name, version, and pin check |
 | `show tztp audit [--last <n>]` | show | Recent audit events |
 | `config tztp enable \| disable` | config | Turn Trusted ZTP on or off (`trusted_mode`) |
 | `config tztp enforce (true \| false)` | config | Set secure-only enforcement (`enforce`) |
-| `config tztp server add \| del <url>` | config | Manage the static bootstrap-server list |
 
 ##### `show tztp status [--json]`
 
@@ -1561,23 +1559,9 @@ SZTP client      : sztp-agent 0.2.0  (pinned >=0.2.0,<0.3.0, OK)
 Status           : SUCCESS
 ```
 
-##### `show tztp client`
-
-**Description.** Displays the reused RFC 8572 client that is packaged in the image, its installed version, the version range pinned in the trust plane, and whether the installed version satisfies that pin. Useful for verifying that a build carries the expected, audited client (§13.7). A `Version OK : false` here corresponds to the `CLIENT_VERSION_MISMATCH` audit event and a failed provisioning run.
-
-**Example.**
-
-```
-admin@sonic:~$ show tztp client
-Client         : sztp-agent
-Installed      : 0.2.0
-Pinned range   : >=0.2.0,<0.3.0
-Version OK     : true
-```
-
 ##### `show tztp audit [--last <n>]`
 
-**Description.** Displays the durable Trusted ZTP audit trail from `STATE_DB TZTP_AUDIT|*` (§13.4), newest last. Each row is one phase transition. This is the first place to look when diagnosing a failed or fallen-back provisioning attempt.
+**Description.** Displays the durable Trusted ZTP audit trail from `STATE_DB TZTP_AUDIT|*`, newest last. Each row is one phase transition. This is the first place to look when diagnosing a failed or fallen-back provisioning attempt.
 
 **Options.** `--last <n>` — limit the output to the most recent `n` events (default: all events for the current session).
 
@@ -1595,7 +1579,7 @@ TIMESTAMP             EVENT                DETAIL
 
 ##### `config tztp enable | disable`
 
-**Description.** Sets `trusted_mode` in CONFIG_DB to `true` (`enable`) or `false` (`disable`). `disable` returns the switch to the exact legacy ZTP behaviour (§11.5). Because `trusted_mode` normally originates from the factory trust plane, this command is intended for lab bring-up and controlled re-provisioning rather than day-to-day operation.
+**Description.** Sets `trusted_mode` in CONFIG_DB to `true` (`enable`) or `false` (`disable`). `disable` returns the switch to the exact legacy ZTP behaviour. Because `trusted_mode` normally originates from the factory trust plane, this command is intended for lab bring-up and controlled re-provisioning rather than day-to-day operation.
 
 **Example.**
 
@@ -1606,7 +1590,7 @@ Trusted ZTP enabled. Run 'config tztp enforce true' to disable legacy fallback.
 
 ##### `config tztp enforce (true | false)`
 
-**Description.** Sets the `enforce` flag. `true` selects secure-only operation: legacy option-67/239 discovery and the unauthenticated HTTP/TFTP/FTP transports are disabled, and any missing trust material or failed check fails closed. `false` selects transition mode, which permits fallback to legacy ZTP when the secure path cannot be attempted (§11.5). Has no effect unless `trusted_mode` is enabled.
+**Description.** Sets the `enforce` flag. `true` selects secure-only operation: legacy option-67/239 discovery and the unauthenticated HTTP/TFTP/FTP transports are disabled, and any missing trust material or failed check fails closed. `false` selects transition mode, which permits fallback to legacy ZTP when the secure path cannot be attempted. Has no effect unless `trusted_mode` is enabled.
 
 **Example.**
 
@@ -1614,20 +1598,6 @@ Trusted ZTP enabled. Run 'config tztp enforce true' to disable legacy fallback.
 admin@sonic:~$ sudo config tztp enforce true
 Enforce mode ON: legacy discovery and unauthenticated transports are now disabled.
 ```
-
-##### `config tztp server add | del <url>`
-
-**Description.** Adds or removes a static bootstrap-server URL in the `static_servers` list, used when DHCP option 143/136 discovery is not available. The `<url>` must be `https://` (the YANG model rejects non-TLS URLs). Multiple servers may be configured; they are tried in order and honour RFC 8572 redirects.
-
-**Arguments.** `<url>` — the bootstrap server URL, e.g. `https://bootstrap.example.net`.
-
-**Example.**
-
-```
-admin@sonic:~$ sudo config tztp server add https://bootstrap.example.net
-admin@sonic:~$ sudo config tztp server del https://old-server.example.net
-```
-
 ---
 
 ### 12. Warmboot and Fastboot Design Impact  
