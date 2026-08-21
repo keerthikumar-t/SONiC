@@ -159,6 +159,12 @@ sequenceDiagram
     Note over S,Z: Plaintext Communication
 
     S->>Z: HTTP GET /ztp.json
+    Z-->>S: ztp.json
+
+    S->>Z: HTTP GET /sonic-image.bin
+    Z-->>S: 200 OK
+
+    S->>Z: HTTP GET /config_db.json
     Z-->>S: config_db.json
 
     S->>C: config reload
@@ -179,10 +185,11 @@ SONiC ZTP does not rely entirely on standard security mechanisms. Instead, it us
 
 - Configuration files hosted on the provisioning server can be optionally encrypted using **AES encryption**.
 - Files can be digitally signed using **RSA/SHA-512 signatures** to ensure their integrity and authenticity.
-- The signing keys are embedded into the SONiC image when the firmware is built.
 - SONiC can optionally verify the HTTPS server certificate before downloading files.
 
-> **Important:** HTTPS certificate verification can be disabled by setting the following option: `secure: false`
+> **Important:** HTTPS certificate verification can be disabled by setting the following option: `secure: false` within ZTP JSON file i.e. used at ZTP sections such as firmware, config, plugin, or file downloads.
+
+> When 'secure:false' is set, the downloader performs HTTPS downloads without validating the server's TLS certificate (curl -k). Encryption still exists, but the switch does not verify that it is communicating with the legitimate provisioning server.
 
 There is no in-band mechanism for a factory-fresh device to establish who it is talking to or whether the payload legitimately belongs to it. Consequently, an attacker positioned on the provisioning network can serve a malicious image or configuration to a switch during its most vulnerable moment — first boot.
 
