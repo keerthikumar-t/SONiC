@@ -2,10 +2,14 @@
 
 ## High Level Design Document
 
-**Feature:** Trusted ZTP (tZTP) — RFC 8572 Secure Zero Touch Provisioning for SONiC
+**Feature:** Trusted Zero Touch Provisioning (Trusted ZTP) for SONiC
+
 **Version:** 1.0
+
 **Status:** Draft — submitted for SONiC community HLD review
+
 **Target release:** To be assigned by the SONiC TSC
+
 
 ---
 
@@ -38,9 +42,26 @@
 
 ### 2. About This Document  
 
-This High Level Design (HLD) proposes **Trusted ZTP (tZTP)** — a standards-based, cryptographically secured onboarding capability for SONiC based on **RFC 8572 (Secure Zero Touch Provisioning)**.
+This High-Level Design (HLD) introduces **Trusted ZTP (tZTP)**, a standards-based and cryptographically secure onboarding solution for SONiC built on **RFC 8572 Secure Zero Touch Provisioning (SZTP)**.
 
-The design is intentionally conservative: it **augments** the existing `sonic-ztp` service rather than replacing it, **reuses** a mature, permissively licensed RFC 8572 implementation rather than writing the security-critical protocol from scratch, and remains **disabled by default** so that existing deployments are unaffected.
+The design follows a conservative and low-risk approach that prioritizes security, maintainability, and backward compatibility. Rather than replacing SONiC's existing `sonic-ztp` framework, Trusted ZTP extends and enhances it with standards-compliant security controls.
+
+Key design principles include:
+
+- **Augmentation rather than replacement**: Trusted ZTP builds on the existing `sonic-ztp` service instead of introducing an entirely new onboarding framework.
+- **Reuse of proven technology**: The design leverages an existing, mature, and permissively licensed RFC 8572 implementation rather than developing a new security-sensitive provisioning protocol from scratch.
+- **Standards-based onboarding**: Device onboarding, ownership validation, and secure configuration delivery follow the RFC 8572 specification.
+- **Backward compatibility**: Existing SONiC ZTP deployments continue to operate unchanged.
+- **Secure-by-option deployment**: Trusted ZTP is disabled by default and must be explicitly enabled by operators.
+- **Reduced implementation risk**: Reusing established components minimizes development complexity and limits exposure to security vulnerabilities in custom protocol implementations.
+
+Key design Goals of Trusted ZTP aims to:
+
+1. Provide cryptographically verifiable device onboarding.
+2. Establish device ownership through secure ownership vouchers.
+3. Protect onboarding communications using modern TLS-based security.
+4. Integrate with SONiC's existing provisioning workflow with minimal disruption.
+5. Preserve compatibility with current deployment models while enabling organizations to adopt stronger security controls when required.
 
 
 ### 3. Scope  
