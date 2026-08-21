@@ -27,12 +27,12 @@
 10. [Implementation Phasing](#10-implementation-phasing)
 11. [Configuration and Management](#11-configuration-and-management)
 12. [Warmboot and Fastboot Design Impact](#12-warmboot-and-fastboot-design-impact)
-13. [Memory Consumption](#13-memory-consumption)
-14. [Restrictions/Limitations](#14-restrictions-/-limitations)
-15. [Testing Requirements](#15-testing-requirements)
-16. [Open/Action items](#16-open-/-action-items)
-17. [Appendix A](#17-appendix-a-pki-trust-hierarchy)
-18. [Appendix B](#18-appendix-b-how-phase1-works-without-a-TPM)
+13. [Restrictions/Limitations](#14-restrictions-/-limitations)
+14. [Testing Requirements](#15-testing-requirements)
+15. [Open/Action items](#16-open-/-action-items)
+16. [Appendix A](#16-the-core-concept-of-trusted-ztp-Device-Identity-=-Serial-Number-Embedded-in-a-Certificate)
+16. [Appendix B](#17-appendix-a-pki-trust-hierarchy)
+17. [Appendix C](#18-appendix-b-how-phase1-works-without-a-TPM)
 
 ### 1. Revision History  
 
@@ -236,7 +236,7 @@ tZTP (Trusted ZTP) is a security extension to the existing ZTP mechanism. It imp
                           │ Helpers: swtpm (software TPM)                │
                           └──────────────────────────────────────────────┘
 ```
-*Figure 2: The Big Picture — The Players of Secure Zero Touch Provisioning sequence*
+*Figure 2 : The Big Picture — The Players of Secure Zero Touch Provisioning sequence*
 
 
 Crucially, **once the payload is validated, nothing about how SONiC applies configuration changes**. The validated payload is translated into SONiC's normal provisioning data and handed to the existing engine and plugins. The new work is confined to *establishing trust and obtaining a verified payload* — not to reimplementing provisioning.
@@ -441,7 +441,47 @@ Within the `sonic-ztp` service, Trusted ZTP introduces a secure front-end archit
 
 The implementation reuses the RFC 8572 Secure Zero Touch Provisioning client (`sztp-agent`), which is isolated behind a dedicated adapter layer. This design ensures that the SZTP client can be upgraded, modified, or replaced without affecting other components of the Trusted ZTP framework.
 
-### 8.1 Key Design Principles
+#### Zero Touch Provisioning using 'sztp-agent' 
+
+```mermaid
+sequenceDiagram
+
+    participant ZTP as SONiC ZTP Engine
+    participant Adapter as SztpClientAdapter
+    participant Agent as sztp-agent
+    participant Server as Bootstrap Server
+
+    ZTP->>Adapter: Start SZTP
+    Adapter->>Agent: Execute bootstrap command
+
+    Agent->>Server: TLS Handshake
+    Server-->>Agent: Server Certificate
+
+    Agent->>Server: Device Certificate
+    Server-->>Agent: Validate Device Identity
+
+    Server-->>Agent: Ownership Voucher
+    Server-->>Agent: Signed Onboarding Data
+
+    Agent->>Agent: Verify Voucher
+    Agent->>Agent: Validate Signatures
+    Agent->>Agent: Verify Trust Anchors
+
+    Agent-->>Adapter: onboarding.json
+    Agent-->>Adapter: Exit Code
+
+    Adapter-->>ZTP: SUCCESS / SUSPEND / FAILED
+
+    alt SUCCESS
+        ZTP->>ZTP: Map and Apply Configuration
+    else SUSPEND
+        ZTP->>ZTP: Retry Later
+    else FAILED
+        ZTP->>ZTP: Record Security Failure
+    end
+```
+
+*Figure 5 : End-to-End Provisioning using 'sztp-agent'*
 
 - Each module has a single, well-defined responsibility.
 - The architecture separates security-critical functions from other processing tasks.
@@ -449,8 +489,7 @@ The implementation reuses the RFC 8572 Secure Zero Touch Provisioning client (`s
 - Changes to the SZTP client have minimal impact on the rest of the system.
 - The modular design simplifies maintenance, testing, and future enhancements.
 
-
-#### Establishing Trust: the Trust Plane and Trust Models
+### 8.1 Key Design Principle: Establishing Trust
 
 Before a factory-fresh switch accepts any configuration, five things indicated below must line up. The table is the roadmap; each row builds Trust in ZTP.
 
@@ -519,10 +558,9 @@ Phase 2 strengthens this model by measuring the trust plane into a TPM, making u
 
 ---
 
-### 8.2 tZTP Components & Data Flow
+### 8.2 Trusted ZTP Components Overview
 
 During a successful secure provisioning process:
-
 1. The Trusted ZTP front-end receives provisioning requests.
 2. The adapter communicates with the RFC 8572 `sztp-agent`.
 3. The `sztp-agent` performs secure provisioning operations.
@@ -551,7 +589,7 @@ flowchart TB
     classDef reuse fill:#d6eaf8,stroke:#2471a3,color:#154360
     classDef io fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
 ```
-*Figure 5 : Trusted ZTP internal components and secure data flow. The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
+*Figure 6 : Trusted ZTP internal components and secure data flow. The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
 
 #### Component Responsibilities
 
@@ -654,7 +692,7 @@ flowchart TD
 
     Adapter -.-> note1
 ```
-*Figure 6 : SZTP Client Adapter Architecture*
+*Figure 7 : SZTP Client Adapter Architecture*
 
 `SztpClientAdapter` executes the `sztp-agent` client and translates the results into existing SONiC provisioning outcomes, so the existing handling simply works:
 
@@ -705,7 +743,7 @@ flowchart TD
     J --> M
     K --> N
 ```
-*Figure 7 : SztpClientAdapter Exit Code to SONiC Outcome Mapping*
+*Figure 8 : SztpClientAdapter Exit Code to SONiC Outcome Mapping*
 
 #### 04. TimeAnchor
 **Type:** New 
@@ -831,14 +869,14 @@ flowchart LR
     classDef pin fill:#fdebd0,stroke:#b9770e,color:#5c3c04
 ```
 
-*Figure 8 : Section synthesis. The RFC's four fields (grey) become generated sections in the reserved ranges (green); an operator `sonic-config` envelope of format `ztp-json` contributes sections 10–89 (blue). The two amber boxes are the properties that make the result safe to hand to the engine.*
+*Figure 9 : Section synthesis. The RFC's four fields (grey) become generated sections in the reserved ranges (green); an operator `sonic-config` envelope of format `ztp-json` contributes sections 10–89 (blue). The two amber boxes are the properties that make the result safe to hand to the engine.*
+
 
 #### 06. AuditSink
 **Type:** New 
 
 Records provisioning status, security events, and audit information into SONiC's `STATE_DB` and system logs. This provides visibility and traceability for provisioning operations.
 
----
 
 #### 07. IdentityManager
 **Type:** New (Phase 2)
@@ -850,7 +888,6 @@ Manages hardware-based device identities stored in the TPM, including:
 
 It also handles secure certificate and key renewal operations while ensuring the private keys remain protected.
 
----
 
 #### 08. sztp-agent
 **Type:** 3rd-party Open-source : Reused (Go)
@@ -904,9 +941,7 @@ flowchart TD
     K --> M
 ```
 
-*Figure 9 : 3rd-party open-source SZTP-Agent Security Processing Architecture - RFC 8572 Secure Bootstrapping Processing Flow*
-
----
+*Figure 10 : 3rd-party open-source SZTP-Agent Security Processing Architecture - RFC 8572 Secure Bootstrapping Processing Flow*
 
 #### 09. ztp-engine.py and Plugins
 **Type:** Reused (Python)
@@ -919,48 +954,7 @@ The existing SONiC configuration engine that applies:
 
 No changes are required to this component. It continues to perform configuration deployment using the validated data provided by Trusted ZTP.
 
-##### Complete End-to-End Provisioning Sequence with tZTP components
-
-```mermaid
-sequenceDiagram
-
-    participant ZTP as SONiC ZTP Engine
-    participant Adapter as SztpClientAdapter
-    participant Agent as sztp-agent
-    participant Server as Bootstrap Server
-
-    ZTP->>Adapter: Start SZTP
-    Adapter->>Agent: Execute bootstrap command
-
-    Agent->>Server: TLS Handshake
-    Server-->>Agent: Server Certificate
-
-    Agent->>Server: Device Certificate
-    Server-->>Agent: Validate Device Identity
-
-    Server-->>Agent: Ownership Voucher
-    Server-->>Agent: Signed Onboarding Data
-
-    Agent->>Agent: Verify Voucher
-    Agent->>Agent: Validate Signatures
-    Agent->>Agent: Verify Trust Anchors
-
-    Agent-->>Adapter: onboarding.json
-    Agent-->>Adapter: Exit Code
-
-    Adapter-->>ZTP: SUCCESS / SUSPEND / FAILED
-
-    alt SUCCESS
-        ZTP->>ZTP: Map and Apply Configuration
-    else SUSPEND
-        ZTP->>ZTP: Retry Later
-    else FAILED
-        ZTP->>ZTP: Record Security Failure
-    end
-```
-
-*Figure 10 : Complete End-to-End Provisioning Sequence with tZTP components*
-
+---
 
 ### 8.3 Impacted SONiC Repositories
 The impact per repository and data store is summarised below.
@@ -1185,10 +1179,8 @@ The configuration is modeled using YANG and stored in `CONFIG_DB`. The final sto
   }
 }
 ```
----
 
 #### 11.2. Config DB Enhancements : The complete field set (CONFIG_DB TZTP|global):
-
 
 | Parameter | Default Value | Description |
 |------------|---------------|-------------|
@@ -1221,21 +1213,9 @@ Trusted ZTP configuration can originate from two sources:
 | `CONFIG_DB (TZTP \ global)` | Runtime configuration used after onboarding. Managed through CLI, gNMI, or management frameworks. |
 
 
-##### Operational Parameters
-
-The following settings may be freely modified through `CONFIG_DB` because they do not affect the underlying trust model:
-
-- Retry counts
-- Retry delays
-- LDevID renewal schedules
-- Static bootstrap server lists
-- Discovery interface preferences
-
----
-
 #### 11.3 YANG model Enhancements 
 
-The complete model, `sonic-tztp.yang`, describes the CONFIG_DB `TZTP|global` table. Its design goal is that an insecure configuration is not merely discouraged but **unrepresentable**: the `must` statements reject any attempt to weaken security while `trusted_mode` is enabled, the `https-uri` type forbids non-TLS servers, and the Phase-2 identity leaves are gated with `when "../identity_source = 'tpm'"` so they exist only when relevant.
+The yang model `sonic-tztp.yang` is detailed below and it describes the CONFIG_DB `TZTP|global` contents. 
 
 ```yang
 module sonic-tztp {
@@ -1494,63 +1474,25 @@ module sonic-tztp {
 }
 ```
 
-##### Security Invariants Enforced by the Configuration Model
-
-| Security Invariant | Description |
-|-------------------|-------------|
-| **No insecure discovery in secure mode** | When `trusted_mode` is enabled, the legacy DHCP discovery option `option_67` cannot be configured. Only secure discovery mechanisms are allowed. |
-| **No unsigned payloads** | When `trusted_mode` is enabled, `allow_unsigned_fallback` cannot be set to `true`. All provisioning payloads must be cryptographically verified. |
-| **Ownership vouchers are mandatory** | When `trusted_mode` is enabled, `require_ownership_voucher` cannot be disabled. A valid ownership voucher is always required to establish device ownership. |
-| **Hardware-backed identity can be enforced** | Setting `allow_file_based_idevid = false` requires `identity_source = tpm`, ensuring that device identity credentials are stored and protected by TPM hardware. |
-| **Modern TLS only** | The minimum TLS version defaults to `TLSv1.3`, and bootstrap server definitions (`static_servers`) must use `https://` URLs, preventing the use of insecure transport protocols. |
-
-
 **Important Security Note**
 
 > **YANG provides configuration validation, not a runtime security boundary.**
 
 The YANG model enforces these constraints only through the **management interfaces**, such as:
-
 - CLI
 - gNMI
 - Other management-framework APIs
 
 This provides:
-
 - Early validation of configuration changes
 - Protection against accidental misconfiguration
 - A clear and consistent operational contract for administrators
 
-However, `CONFIG_DB` is implemented using Redis. A component with direct access to the datastore could theoretically bypass YANG validation and write invalid or insecure values directly into the database.
-
-
-#### Actual Runtime Security Enforcement
-
-The effective runtime security posture is enforced by the Trusted ZTP runtime components, specifically:
-
-- `TrustBootstrap`
-- Trusted ZTP engine
-- Factory trust plane (`bootstrap.json`)
-
-The factory trust plane remains the authoritative source for security-critical settings, including:
-
-- Trust anchors
-- Enforcement mode
-- Ownership voucher requirements
-- Trust model selection
-
-Runtime configuration stored in `CONFIG_DB` is **not permitted to weaken** these settings. It may only maintain or strengthen the security posture established during manufacturing.
-
-This ensures that a device shipped in a secure configuration cannot be silently downgraded by:
-
-- Misconfiguration
-- Unauthorized configuration changes
-- Direct datastore manipulation
+The effective runtime security posture is enforced by the **Trusted ZTP runtime components**. Runtime configuration stored in `CONFIG_DB` is **not permitted to weaken** these settings. 
 
 ---
 
 #### 11.4. Operational State DB Enhancements (STATE_DB)  
-
 
 Operational visibility is provided by a new STATE_DB table, `TZTP|status`, which does not exist for legacy ZTP:
 
@@ -1575,8 +1517,9 @@ Operational visibility is provided by a new STATE_DB table, `TZTP|status`, which
 
 **Durable Audit Trail**
 
-Each phase transition writes both a STATE_DB audit entry (`TZTP_AUDIT|{timestamp}|{event}`) and a system-log record tagged `tztp`. The main events are:
+Each phase transition writes both a STATE_DB audit entry (`TZTP_AUDIT|{timestamp}|{event}`) and a system-log record tagged `tztp`. 
 
+The main events would be:
 | Event | Trigger |
 |:------|:--------|
 | `MTLS_HANDSHAKE_OK` / `FAIL` | TLS mutual-authentication result |
@@ -1584,7 +1527,7 @@ Each phase transition writes both a STATE_DB audit entry (`TZTP_AUDIT|{timestamp
 | `CMS_VERIFY_OK` / `FAIL` | Payload signature validation result |
 | `EST_ENROLL_OK` / `FAIL` | (Phase 2) LDevID enrollment via EST |
 | `CONFIG_APPLY_OK` / `FAIL` | Configuration apply / rollback result |
-| `TRUST_FALLBACK_LEGACY` | Transition-mode fallback to legacy taken (§11.5) |
+| `TRUST_FALLBACK_LEGACY` | Transition-mode fallback to legacy taken  |
 | `TRUST_DOWNGRADE_BLOCKED` | Enforced mode blocked a legacy fallback |
 | `CLIENT_VERSION_MISMATCH` | Installed client is outside the pinned version range |
 
@@ -1592,23 +1535,20 @@ Each phase transition writes both a STATE_DB audit entry (`TZTP_AUDIT|{timestamp
 
 #### 11.5. CLI
 
-Trusted ZTP adds commands to SONiC's standard Click-based CLI, provided by `sonic-utilities`. They fall into two groups: **`show tztp *`** commands are read-only, read from STATE_DB, and are available to any user; **`config tztp *`** commands modify CONFIG_DB and require administrative (root) privilege. All commands are no-ops when the feature is compiled out, and the `config` commands are rejected by the YANG model if they would create an insecure combination (§13.2).
+Trusted ZTP adds commands to SONiC's standard Click-based CLI, provided by `sonic-utilities`. The **`show tztp *`** commands are read-only, read from STATE_DB and are available to any user. All commands are no-ops when the feature is compiled out.
+
+#### Command List:
 
 | Command | Type | Purpose |
 |:--------|:-----|:--------|
-| `show tztp status [--json]` | show | Current provisioning status and trust results |
+| `show tztp status` | show | Current provisioning status and trust results |
 | `show tztp audit [--last <n>]` | show | Recent audit events |
-| `config tztp enable \| disable` | config | Turn Trusted ZTP on or off (`trusted_mode`) |
-| `config tztp enforce (true \| false)` | config | Set secure-only enforcement (`enforce`) |
 
-##### `show tztp status [--json]`
+##### `show tztp status`
 
-**Description.** Displays the current Trusted ZTP state — the mode, the trust model in use, the bootstrap server contacted, the outcome of voucher and server validation, the reused client version, and the overall result. Reads `STATE_DB TZTP|status` (§13.3).
-
-**Options.** `--json` — emit machine-readable JSON instead of the formatted table (for automation and telemetry collectors).
+**Description.** Displays the current Trusted ZTP state — the mode, the trust model in use, the bootstrap server contacted, the outcome of voucher and server validation, the reused client version, and the overall result. Reads `STATE_DB TZTP|status`.
 
 **Example.**
-
 ```
 admin@sonic:~$ show tztp status
 Trusted ZTP      : enabled (enforce = true)
@@ -1628,7 +1568,6 @@ Status           : SUCCESS
 **Options.** `--last <n>` — limit the output to the most recent `n` events (default: all events for the current session).
 
 **Example.**
-
 ```
 admin@sonic:~$ show tztp audit --last 5
 TIMESTAMP             EVENT                DETAIL
@@ -1637,28 +1576,6 @@ TIMESTAMP             EVENT                DETAIL
 2026-08-01T10:15:03Z  CMS_VERIFY_OK        -
 2026-08-01T10:15:07Z  CONFIG_APPLY_OK      -
 2026-08-01T10:15:07Z  STATUS               SUCCESS
-```
-
-##### `config tztp enable | disable`
-
-**Description.** Sets `trusted_mode` in CONFIG_DB to `true` (`enable`) or `false` (`disable`). `disable` returns the switch to the exact legacy ZTP behaviour. Because `trusted_mode` normally originates from the factory trust plane, this command is intended for lab bring-up and controlled re-provisioning rather than day-to-day operation.
-
-**Example.**
-
-```
-admin@sonic:~$ sudo config tztp enable
-Trusted ZTP enabled. Run 'config tztp enforce true' to disable legacy fallback.
-```
-
-##### `config tztp enforce (true | false)`
-
-**Description.** Sets the `enforce` flag. `true` selects secure-only operation: legacy option-67/239 discovery and the unauthenticated HTTP/TFTP/FTP transports are disabled, and any missing trust material or failed check fails closed. `false` selects transition mode, which permits fallback to legacy ZTP when the secure path cannot be attempted. Has no effect unless `trusted_mode` is enabled.
-
-**Example.**
-
-```
-admin@sonic:~$ sudo config tztp enforce true
-Enforce mode ON: legacy discovery and unauthenticated transports are now disabled.
 ```
 ---
 
@@ -1676,12 +1593,7 @@ Trusted ZTP runs only during initial provisioning (factory default or an explici
 
 ---
 
-### 13. Memory Consumption
-To Be Updated. 
-
----
-
-### 14. Restrictions/Limitations  
+### 13. Restrictions/Limitations  
 
 - **Requires a bootstrap server.** The mature server (Watsen) is proprietary; `google/open-sztp` is the open-source candidate but is young and needs an interoperability gate.
 - **Phase 1 device identity is file-based.** It relies on a pre-installed device certificate and operator-provisioned trust anchors; it does not establish identity from a hardware root of trust until Phase 2.
@@ -1695,9 +1607,9 @@ To Be Updated.
 
 ---
 
-### 15. Testing Requirements/Design  
+### 14. Testing Requirements/Design  
 
-#### 15.1. Unit Test cases  
+#### 14.1. Unit Test cases  
 Unit tests run with the client mocked, so they require no live TPM, network, or bootstrap server (NFR-6).
 
 | ID | Area | Verifies |
@@ -1713,7 +1625,7 @@ Unit tests run with the client mocked, so they require no live TPM, network, or 
 | UT-9 | YANG | Insecure configuration combinations are rejected by the model |
 
 
-#### 15.2. Functional and Integration Test cases
+#### 14.2. Functional and Integration Test cases
 
 | ID | Scenario | Expected outcome |
 |:---|:---------|:-----------------|
@@ -1735,11 +1647,138 @@ Unit tests run with the client mocked, so they require no live TPM, network, or 
 
 ---
 
-### 16. Open/Action items 
+### 15. Open/Action items 
 
 ---
 
-### 17. Appendix A : PKI Trust Hierarchy
+### 16. Appendix A: The Core Concept of Trusted ZTP : Device Identity = Serial Number Embedded in a Certificate
+
+>
+> **A device's identity is its serial number, stored inside a unique device certificate.**
+
+Rather than identifying devices using IP addresses, hostnames, or manually maintained inventories, Trusted ZTP uses a cryptographic identity. Each switch receives its own certificate containing the device serial number, and that certificate becomes the device's identity during onboarding.
+
+#### How It Works
+
+1. Each switch is provisioned with a unique device certificate (DevID).
+2. The device serial number is embedded in the certificate's Subject or Subject Alternative Name (SAN).
+3. During onboarding, the switch connects to the bootstrap server using mutual TLS (mTLS).
+4. The bootstrap server extracts the serial number directly from the certificate.
+5. The serial number is used to locate the onboarding profile assigned to that device.
+6. The server returns the correct onboarding information for that specific switch.
+
+#### Device Certificate Example
+
+```text
+┌──────── Device Certificate (DevID) ─────────┐
+│ Subject:                                    │
+│    serialNumber = first-serial-number       │
+│                                             │
+│ Signed By: Device Identity CA               │
+└─────────────────────────────────────────────┘
+```
+
+The serial number embedded in the certificate is the device's identity.
+
+#### Bootstrap Server Mapping
+
+The bootstrap server is configured to extract the serial number from the client certificate and use it as a lookup key.
+
+```text
+┌──────── Bootstrap Server (SZTP) ────────────────────────┐
+│ Serial Number Extraction:                               │
+│   wn-x509-c2n:serial-number                             │
+│                                                         │
+│ Device Mapping:                                         │
+│                                                         │
+│ first-serial-number  → first-onboarding-profile         │
+│ second-serial-number → second-onboarding-profile        │
+│ third-serial-number  → third-onboarding-profile         │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### End-to-End Flow
+
+```text
+┌───────────────────┐
+│ Device Certificate│
+│ Serial: Device123 │
+└─────────┬─────────┘
+          │
+          │ Mutual TLS
+          ▼
+┌───────────────────┐
+│ Bootstrap Server  │
+│ Extract Serial    │
+│ = Device123       │
+└─────────┬─────────┘
+          │
+          │ Lookup Device123
+          ▼
+┌───────────────────┐
+│ Onboarding Profile│
+└─────────┬─────────┘
+          │
+          ▼
+   Boot Image
+   Configuration
+   Pre-Script
+   Post-Script
+```
+
+#### Example Onboarding Profile
+For a device whose certificate contains:
+```text
+serialNumber = first-serial-number
+```
+
+the server may return:
+```text
+first-onboarding-profile
+├── Boot Image
+│   └── first-boot-image.img
+│       └── SHA-256 verification hash
+│
+├── Configuration
+│   └── first-configuration.xml
+│
+├── Pre-Configuration Script
+│   └── first-pre-configuration-script.sh
+│
+└── Post-Configuration Script
+    └── first-post-configuration-script.sh
+```
+
+#### Why This Design Matters
+This model provides several important security benefits:
+
+| Benefit | Explanation |
+|----------|-------------|
+| Unique identity per switch | Every device has its own certificate and serial number. |
+| Cryptographic authentication | The identity is protected by certificate-based authentication rather than relying on easily spoofed values such as IP addresses. |
+| Automated onboarding | The bootstrap server automatically determines which onboarding profile belongs to a device. |
+| Ownership verification | Ownership vouchers reference the same serial number, allowing the server and device to verify ownership consistently. |
+| Supports both Phase 1 and Phase 2 | The same identity model works with file-based certificates (Phase 1) and TPM-backed IDevIDs (Phase 2). |
+
+#### Phase 1 vs Phase 2
+The onboarding logic remains exactly the same in both phases.
+
+| Phase 1 | Phase 2 |
+|----------|----------|
+| Serial number stored in a file-based device certificate | Serial number stored in an IEEE 802.1AR TPM-backed IDevID |
+| Private key stored on disk | Private key stored inside TPM |
+| Software-strength identity | Hardware-rooted identity |
+| Same serial lookup process | Same serial lookup process |
+
+The only change is where the private key is stored. The identity model and trust flow remain unchanged.
+
+**Summary**
+Trusted ZTP identifies a switch by reading the serial number embedded inside its device certificate. During mutual TLS onboarding, the bootstrap server extracts this serial number and uses it to retrieve the correct onboarding profile, including the boot image, configuration, and scripts assigned to that switch. 
+**This serial-number-based identity model is the foundation of the entire Trusted ZTP design and works consistently across both file-based (Phase 1) and TPM-backed (Phase 2) implementations.**
+
+---
+
+### 17. Appendix B : PKI Trust Hierarchy
 
 Trusted ZTP relies on a Public Key Infrastructure (PKI) consisting of two Certificate Authorities (CAs): a **Vendor CA** owned by the hardware manufacturer and an **Operator CA** owned by the network operator. Understanding which CA signs which artifacts makes the trust model straightforward.
 
@@ -1772,8 +1811,6 @@ The device learns to trust the Operator CA through one of two trust models:
 - **Trusted-Server Model**: Operator CA is pre-installed during manufacturing.
 - **Voucher-Anchored Model**: The ownership voucher authorizes establishment of trust in the Operator CA.
 
----
-
 ### Device Certificates
 
 Trusted ZTP uses two device identities.
@@ -1800,7 +1837,7 @@ Trusted ZTP uses two device identities.
 
 ---
 
-### 18. Appendix B : How Phase1 works without a TPM
+### 18. Appendix C : How Phase1 works without a TPM
 
 Most current whitebox platforms do not provide a factory-installed TPM-backed IDevID. To enable secure onboarding on existing hardware, Phase 1 introduces a file-based identity model that provides equivalent functionality.
 
@@ -1831,7 +1868,6 @@ flowchart LR
     classDef new fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
     classDef use fill:#d6eaf8,stroke:#2471a3,color:#154360
 ```
-
 *Figure 15 : Phase-1 realization: a per-unit device certificate and CA files stand in for the TPM.*
 
 #### Step 1: Factory or Staging Provisioning
@@ -1879,7 +1915,6 @@ During onboarding:
    - Voucher serial number matches device certificate serial number.
 5. Secure onboarding proceeds only if validation succeeds.
 
----
 
 **Phase 1 Trust Flow**
 
