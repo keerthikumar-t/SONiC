@@ -31,8 +31,9 @@
 14. [Restrictions/Limitations](#14-restrictions-/-limitations)
 15. [Testing Requirements](#15-testing-requirements)
 16. [Open/Action items](#16-open-/-action-items)
+17. [Appendix A](#17-appendix-a-pki-trust-hierarchy)
+18. [Appendix B](#18-appendix-b-how-phase1-works-without-a-TPM)
 
-	
 ### 1. Revision History  
 
 | Version | Date | Author | Description |
@@ -211,9 +212,36 @@ The table below states each gap and how Trusted ZTP closes it. The final column 
 
 tZTP (Trusted ZTP) is a security extension to the existing ZTP mechanism. It implements RFC 8572 (SZTP) in SONiC userspace — adding **secure discovery and trust-establishment stage in front of** that existing service — while remaining fully backward compatible with existing ZTP deployments. Conceptually, today's ZTP performs *"DHCP hands me a URL, I download a configuration."* Trusted ZTP performs *"DHCP hands me a bootstrap server, the device and server prove their identities to each other, and I download a cryptographically signed configuration that I verify against an ownership voucher before applying anything."*
 
+
+```text
+                          ┌──────────────────────────────────────────────┐
+                          │            THE "NETWORK" (owner side)        │
+                          │                                              │
+    ┌──────────┐  DHCP    │  ┌────────────┐   ┌──────────────┐           │
+    │  DEVICE  │◄────────►│  │ DHCP Server│   │ Redirect     │           │
+    │          │ option143│  │  (dhcpd)   │   │ Server       │──┐        │
+    │          │          │  └────────────┘   │(sztpd:8080)  │  │        │
+    │          │          │                   └──────────────┘  │        │
+    │ runs     │ mutual   │                   ┌──────────────┐◄─┘        │
+    │ sZTP     │◄─TLS────►│                   │ Bootstrap    │           │
+    │ AGENT    │ RFC8572  │                   │ Server       │           │
+    │  (Go)    │          │                   │(sztpd:9090)  │           │
+    └────┬─────┘          │                   └──────┬───────┘           │
+         │                │                          │ points to         │
+         │ HTTPS download │                   ┌──────▼───────┐           │
+         └───────────────►│                   │ File Server  │           │
+          boot image,     │                   │ Apache TLS   │           │
+          config,scripts  │                   │    :443      │           │
+                          │                   └──────────────┘           │
+                          │ Helpers: swtpm (software TPM)                │
+                          └──────────────────────────────────────────────┘
+```
+*Figure 2: The Big Picture — The Players of Secure Zero Touch Provisioning sequence*
+
+
 Crucially, **once the payload is validated, nothing about how SONiC applies configuration changes**. The validated payload is translated into SONiC's normal provisioning data and handed to the existing engine and plugins. The new work is confined to *establishing trust and obtaining a verified payload* — not to reimplementing provisioning.
 
-#### The flow in four moves
+#### The Trsted ZTP flow in four moves
 
 ```mermaid
 sequenceDiagram
@@ -239,7 +267,7 @@ sequenceDiagram
     Switch->>Switch: Run Scripts
     Switch-->>BootstrapServer: Report Outcome
 ```
-*Figure2 : Trusted SONiC Bootstrapping Sequence with Mutual TLS*
+*Figure 3 : Trusted SONiC Bootstrapping Sequence with Mutual TLS*
 
 ##### 01. Find the bootstrap server
 
@@ -405,7 +433,7 @@ flowchart TB
     TZTP -. Phase 2 .-> TPM
 ```
 
-*Figure 3 : Trusted ZTP mapped onto the standard SONiC architecture. The change is confined to the native ZTP service, the CLI, and two database tables; the SWSS / syncd / SAI / ASIC stack is untouched*
+*Figure 4 : Trusted ZTP mapped onto the standard SONiC architecture. The change is confined to the native ZTP service, the CLI, and two database tables; the SWSS / syncd / SAI / ASIC stack is untouched*
 
 ### 8. High-Level Design 
 
@@ -458,32 +486,15 @@ On the signed-data path the switch verifies below five links, each against somet
 
 - **Config is for this switch** — the voucher's **serial number** must equal the switch's own serial.
 
-
 #### 04. **Device identity**
 
 Trusted ZTP requires every device to possess a unique identity that is cryptographically tied to the switch's hardware serial number. The implementation differs between Phase 1 and Phase 2, but the core requirement remains the same: **each switch must have its own unique cryptographic identity**.
 
 A shared certificate or common key embedded into a software image is not acceptable because it would break the association between the device identity and the hardware serial number, undermining ownership verification.
 
-##### Phase 1: File-Based Device Identity
-Phase 1 uses a software-based identity model to ensure compatibility with existing hardware platforms.
+**Phase 1: File-Based Device Identity** : Phase 1 uses a software-based identity model to ensure compatibility with existing hardware platforms.
 
-Characteristics:
-- A unique device certificate is provisioned during manufacturing or staging.
-- The certificate is stored as a file on the device.
-- The certificate serial number matches the hardware serial number.
-- Authentication is based on ownership-voucher validation rather than mutual TLS.
-- The private key is stored on disk and is therefore considered **software-strength** protection.
-
-##### Phase 2: TPM-Based IDevID
-Phase 2 introduces a hardware-rooted identity using a TPM (Trusted Platform Module) 2.0.
-
-Characteristics:
-- Uses a factory-installed IEEE 802.1AR Initial Device Identity (IDevID).
-- The private key is generated and stored inside the TPM.
-- The private key never leaves the TPM.
-- Supports mutual TLS authentication.
-- Provides hardware-backed protection for device credentials.
+**Phase 2: TPM-Based IDevID** : Phase 2 introduces a hardware-rooted identity using a TPM (Trusted Platform Module) 2.0.
 
 ##### Identity Requirements
 Regardless of the implementation phase:
@@ -498,44 +509,13 @@ Because Phase 1 uses file-based identities, Trusted ZTP does **not require** cli
 #### 05. **Trust-plane integrity**
 
 Trust-Plane Integrity determines whether the device can trust the security configuration and trust anchors that guide the onboarding process. This includes components such as:
-
 - `bootstrap.json`
 - Trusted CA certificates
 - Ownership-validation configuration
 - Trust anchors used during secure provisioning
 
-The protection mechanism differs between Phase 1 and Phase 2.
-
-##### Phase 1: Secure Boot-Based Trust
-In Phase 1, trust-plane artifacts such as `bootstrap.json` and CA certificates are protected primarily through operating system file permissions.
-
-The security model assumes that **UEFI Secure Boot** protects the integrity of the installed SONiC image by preventing unauthorized modification of:
-- System software
-- Trusted ZTP components
-- Factory trust configuration
-- Embedded vendor trust anchors
-
-Under this model:
-- The trust plane is considered trustworthy because the booted image is trusted.
-- Attackers cannot silently replace trust anchors or onboarding policies without modifying the signed software image.
-- Physical attacks against the device are considered out of scope.
-
-##### Phase 2: TPM-Measured Trust Plane
-Phase 2 strengthens trust-plane protection by integrating with a TPM (Trusted Platform Module).
-
-In this model:
-- Trust-plane artifacts are measured during the boot process.
-- Measurements are stored in TPM Platform Configuration Registers (PCRs).
-- Any modification to trust-plane content changes the TPM measurements.
-- Tampering becomes detectable through attestation and integrity verification mechanisms.
-
-Protected elements include:
-- `bootstrap.json`
-- Trust anchors
-- Device identity material
-- Critical onboarding configuration
-
-Phase 1 trusts the onboarding security configuration because it is packaged within a Secure Boot-protected software image. This provides basic integrity protection but assumes the device has not been physically modified. Phase 2 strengthens this model by measuring the trust plane into a TPM, making unauthorized modifications detectable and providing hardware-backed assurance that onboarding trust settings have not been tampered with.
+Phase 1 trusts the onboarding security configuration because it is packaged within a Secure Boot-protected software image. This provides basic integrity protection but assumes the device has not been physically modified. 
+Phase 2 strengthens this model by measuring the trust plane into a TPM, making unauthorized modifications detectable and providing hardware-backed assurance that onboarding trust settings have not been tampered with.
 
 ---
 
@@ -548,7 +528,6 @@ During a successful secure provisioning process:
 3. The `sztp-agent` performs secure provisioning operations.
 4. Provisioning data is validated and processed by the appropriate modules.
 5. The root-level configuration engine applies the approved configuration to the device.
-
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 26}, 'themeVariables': {'fontSize': '12px'}}}%%
@@ -572,15 +551,24 @@ flowchart TB
     classDef reuse fill:#d6eaf8,stroke:#2471a3,color:#154360
     classDef io fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
 ```
-*Figure 4 : Trusted ZTP internal components and secure data flow. The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
+*Figure 5 : Trusted ZTP internal components and secure data flow. The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
 
 #### Component Responsibilities
 
 Trusted ZTP enhances the existing SONiC ZTP service by introducing seven lightweight modules while reusing two existing components. The reused components handle the complex operations such as cryptographic validation and configuration deployment, while the new modules integrate secure provisioning capabilities into SONiC.
 
-Each component is designed with a single, clearly defined responsibility.
+Each component is designed with a single, clearly defined responsibility. They are,
+1. TrustBootstrap
+2. Discovery
+3. SztpClientAdapter
+4. TimeAnchor
+5. PayloadMapper
+6. AuditSink
+7. IdentityManager
+8. sztp-agent
+9. ztp-engine.py and Plugins
 
-##### 01. TrustBootstrap
+#### 01. TrustBootstrap
 **Type:** New 
 
 Responsible for loading the read-only `bootstrap.json` file during startup. It determines the device's trust model and ensures that all required trust information is available. If any mandatory trust material is missing, the module immediately stops the provisioning process (fail-closed behavior) to prevent insecure onboarding.
@@ -608,13 +596,12 @@ Responsible for loading the read-only `bootstrap.json` file during startup. It d
 }
 ```
 
-##### 02. Discovery
+#### 02. Discovery
 **Type:** New 
 
 Discovers bootstrap server information using DHCP Option 143/136 or static configuration. DHCP option 143 is for IPv4 and 136 is for IPv6. In enforced secure mode, it rejects legacy discovery methods that do not meet Trusted ZTP security requirements.
 
 ###### Trusted Zero-Touch Provisioning (tZTP) DHCP Options
-
 ```text
 Option Code: 143/136
 Purpose: Carries the SZTP bootstrap server information (typically a list of HTTPS URLs).
@@ -623,7 +610,6 @@ Format: Encoded as a DHCP option payload containing one or more bootstrap server
 ```
 
 ##### DHCP Option 143 (IPv4)
-
 ```text
 +--------+--------+-----------------------+
 | Code   | Length | URL List              |
@@ -633,7 +619,6 @@ Format: Encoded as a DHCP option payload containing one or more bootstrap server
 ```
 
 ##### DHCPv6 Option 136
-
 ```text
 +--------+--------+-----------------------+
 | Code   | Length | URL List              |
@@ -641,32 +626,8 @@ Format: Encoded as a DHCP option payload containing one or more bootstrap server
 | 136    |   n    | https://ztp.example.com
 +--------+--------+-----------------------+
 ```
-
-##### Bootstrapping Flow
-
-```text
-+--------+       DHCP Discover/Request      +-------------+
-| Device | -------------------------------->| DHCP Server |
-+--------+                                  +-------------+
-     ^                                            |
-     | DHCP Option 143 (IPv4) or 136 (IPv6)       |
-     | Bootstrap Server URL List                  |
-     +--------------------------------------------+
-                      |
-                      v
-              +---------------+
-              | Bootstrap     |
-              | Server (HTTPS)|
-              +---------------+
-                      |
-                      v
-         Ownership Voucher / Redirect Info
-                      |
-                      v
-              Download Config/Image
-```
 			  
-##### 03. SztpClientAdapter
+#### 03. SztpClientAdapter
 **Type:** New 
 
 Acts as an abstraction layer between SONiC and the RFC 8572 Secure Zero Touch Provisioning (SZTP) open-source client. This is the only module aware of the underlying implementation of the SZTP client. It is a thin wrapper layer that runs 'sztp-agent' and understand its result, but shall not entangle in its internals.
@@ -693,7 +654,7 @@ flowchart TD
 
     Adapter -.-> note1
 ```
-*Figure 5: SZTP Client Adapter Architecture*
+*Figure 6 : SZTP Client Adapter Architecture*
 
 `SztpClientAdapter` executes the `sztp-agent` client and translates the results into existing SONiC provisioning outcomes, so the existing handling simply works:
 
@@ -744,9 +705,9 @@ flowchart TD
     J --> M
     K --> N
 ```
-*Figure 6 : SztpClientAdapter Exit Code to SONiC Outcome Mapping*
+*Figure 7 : SztpClientAdapter Exit Code to SONiC Outcome Mapping*
 
-##### 04. TimeAnchor
+#### 04. TimeAnchor
 **Type:** New 
 **Purpose:** Establish a trusted system time when the device clock is incorrect or uninitialized.
 
@@ -790,104 +751,96 @@ The selected policy is recorded in audit logs and system logs for traceability.
 - Ensures all trust decisions are re-validated once accurate network time becomes available.
 
 
-
-##### 05. PayloadMapper
+#### 05. PayloadMapper
 **Type:** New 
 
 Converts the validated provisioning payload received through SZTP into SONiC's standard provisioning format, `ztp_data.json`, allowing the existing ZTP framework to process it without modification.
 
-Sample 'ztp_data.json'
+- RFC 8572's `configuration` field is opaque, so the SONiC config is carried in a small, versioned **`sonic-config`** envelope that names its format
+- `PayloadMapper` reads `format` and rewrites the payload into SONiC's normal `ztp_data.json`, reusing the existing plugins
+- The result is a standard `ztp_data.json`
+
+Sample Format:
 ```json
 {
-    "ztp": {
-        "01-connectivity-check": {
-            "plugin": {
-                "name": "connectivity-check"
-            },
-            "ping-hosts": [
-                "192.168.10.1",
-                "8.8.8.8"
-            ],
-            "retry-count": 3,
-            "retry-interval": 10
-        },
-        "02-firmware": {
-            "plugin": {
-                "name": "firmware"
-            },
-            "install": {
-                "url": {
-                    "source": "http://192.168.10.1/ztp/sonic-image.bin"
-                },
-                "version": "SONiC-OS-202405.3",
-                "set-default": true
-            },
-            "reboot-on-success": false,
-            "ignore-result": false
-        },
-        "03-configdb-json": {
-            "plugin": {
-                "name": "configdb-json"
-            },
-            "url": {
-                "source": "http://192.168.10.1/ztp/config_db.json"
-            },
-            "clear-config": true,
-            "save-config": true
-        },
-        "04-post-install": {
-            "plugin": {
-                "url": {
-                    "source": "http://192.168.10.1/ztp/plugins/post-install.sh"
-                }
-            },
-            "ignore-result": false
-        },
-        "reboot-on-success": false,
-        "restart-ztp-no-config": false,
-        "restart-ztp-interval": 300
+  "ztp": {
+    "restart-ztp-no-config": false,
+    "restart-ztp-on-failure": false,
+    "halt-on-failure": true,
+    "ignore-result": false,
+
+    "00-tztp-pre-script": {
+      "plugin": { "name": "provisioning-script" },
+      "ignore-section-data": true,
+      "provisioning-script": {
+        "url": { "source": "file:///var/lib/ztp/tztp/artifacts/pre.sh" }
+      }
+    },
+    "01-tztp-firmware": {
+      "install": {
+        "url": { "source": "file:///var/lib/ztp/tztp/artifacts/sonic.bin" },
+        "set-default": true
+      },
+      "reboot-on-success": true
+    },
+    "02-tztp-config": {
+      "clear-config": true,
+      "save-config": true,
+      "url": { "source": "file:///var/lib/ztp/tztp/artifacts/config_db.json" }
+    },
+    "99-tztp-post-script": {
+      "plugin": { "name": "provisioning-script" },
+      "ignore-section-data": true,
+      "provisioning-script": {
+        "url": { "source": "file:///var/lib/ztp/tztp/artifacts/post.sh" }
+      }
     }
+  }
 }
 ```
 
-##### Applying a Validated Payload
 ```mermaid
-%%{init: {'sequence': {'mirrorActors': false, 'actorMargin': 28, 'boxMargin': 6, 'messageMargin': 22}, 'themeVariables': {'fontSize': '11px'}}}%%
-sequenceDiagram
-    participant ADP as Adapter
-    participant TA as TimeAnchor
-    participant PM as PayloadMapper
-    participant ENG as ztp-engine
-    participant DB as STATE_DB
-
-    ADP->>TA: anchor trusted time (if clock invalid)
-    ADP->>PM: map payload to ztp_data.json
-    alt new boot image
-        PM->>ENG: firmware section
-        ENG->>ENG: install image, mark in-progress
-        ENG-->>ADP: reboot, restart bootstrap
-        Note over ADP,ENG: skipped if image already matches
-    else same image
-        PM->>ENG: configdb-json section
-        ENG->>ENG: back up, apply atomically
-        alt applied OK
-            ENG->>DB: status = SUCCESS
-        else failure
-            ENG->>ENG: roll back
-            ENG->>DB: status = FAILED
-        end
+%%{init: {'flowchart': {'nodeSpacing': 18, 'rankSpacing': 34}, 'themeVariables': {'fontSize': '12px'}}}%%
+flowchart LR
+    subgraph OI["onboarding-information — closed RFC 8572 schema"]
+        direction TB
+        P1["pre-configuration-script"]:::rfc
+        P2["boot-image<br/>download-uri + image-verification"]:::rfc
+        P3["sonic-config envelope<br/>configuration + handling"]:::rfc
+        P4["post-configuration-script"]:::rfc
     end
+    subgraph GEN["generated ztp_data.json — engine sections"]
+        direction TB
+        S1["00-tztp-pre-script<br/>provisioning-script"]:::new
+        S2["01-tztp-firmware<br/>firmware plugin"]:::new
+        S3["02-tztp-config<br/>configdb-json plugin"]:::new
+        S4["10-89 operator sections<br/>merged from sonic-config"]:::opt
+        S5["99-tztp-post-script<br/>provisioning-script"]:::new
+    end
+    P1 --> S1
+    P2 --> S2
+    P3 --> S3
+    P4 --> S4
+    P4 --> S5
+    GEN --> POL["Pinned session policy<br/>restart-ztp-no-config false<br/>restart-ztp-on-failure false<br/>halt-on-failure true<br/>ignore-result false"]:::pin
+    GEN --> PATHS["Every source is file://<br/>pointing into artifacts/"]:::pin
+
+    classDef rfc fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
+    classDef new fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
+    classDef opt fill:#d6eaf8,stroke:#2471a3,color:#154360
+    classDef pin fill:#fdebd0,stroke:#b9770e,color:#5c3c04
 ```
 
-*Figure 7: Applying a Validated SZTP Payload in SONiC*
+*Figure 8 : Section synthesis. The RFC's four fields (grey) become generated sections in the reserved ranges (green); an operator `sonic-config` envelope of format `ztp-json` contributes sections 10–89 (blue). The two amber boxes are the properties that make the result safe to hand to the engine.*
 
-
-##### 06. AuditSink
+#### 06. AuditSink
 **Type:** New 
 
 Records provisioning status, security events, and audit information into SONiC's `STATE_DB` and system logs. This provides visibility and traceability for provisioning operations.
 
-##### 07. IdentityManager
+---
+
+#### 07. IdentityManager
 **Type:** New (Phase 2)
 
 Manages hardware-based device identities stored in the TPM, including:
@@ -897,7 +850,9 @@ Manages hardware-based device identities stored in the TPM, including:
 
 It also handles secure certificate and key renewal operations while ensuring the private keys remain protected.
 
-##### 08. sztp-agent
+---
+
+#### 08. sztp-agent
 **Type:** 3rd-party Open-source : Reused (Go)
 
 The existing RFC 8572 Secure Zero Touch Provisioning client responsible for:
@@ -948,10 +903,12 @@ flowchart TD
     K --> L
     K --> M
 ```
-*Figure 8: 3rd-party open-source SZTP-Agent Security Processing Architecture - RFC 8572 Secure Bootstrapping Processing Flow*
+
+*Figure 9 : 3rd-party open-source SZTP-Agent Security Processing Architecture - RFC 8572 Secure Bootstrapping Processing Flow*
+
 ---
 
-##### 09. ztp-engine.py and Plugins
+#### 09. ztp-engine.py and Plugins
 **Type:** Reused (Python)
 
 The existing SONiC configuration engine that applies:
@@ -1002,7 +959,7 @@ sequenceDiagram
     end
 ```
 
-*Figure 9: Complete End-to-End Provisioning Sequence with tZTP components*
+*Figure 10 : Complete End-to-End Provisioning Sequence with tZTP components*
 
 
 ### 8.3 Impacted SONiC Repositories
@@ -1057,7 +1014,7 @@ flowchart TD
     classDef fail fill:#f5b7b1,stroke:#a93226,color:#641e16
 ```
 
-*Figure 10 : Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy*
+*Figure 11 : Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy*
 
 
 ### 8.5 Provisioning Workflow
@@ -1096,7 +1053,7 @@ sequenceDiagram
     ENG->>DB: status = SUCCESS + audit events
     AGT->>BS: progress report (bootstrap-complete)
 ```
-*Figure 11 : Successful voucher-anchored provisioning*
+*Figure 12 : Successful voucher-anchored provisioning*
 
 **Step by step:**
 
@@ -1136,7 +1093,7 @@ sequenceDiagram
     ADP->>DB: status = FAILED-VALIDATION + reason
     Note over DISC,DB: No image, configuration, or script is applied.
 ```
-*Figure 12: Fail-closed behaviour on any trust failure*
+*Figure 13 : Fail-closed behaviour on any trust failure*
 
 **Step by step:**
 
@@ -1172,7 +1129,7 @@ sequenceDiagram
     ENG->>DB: TZTP status = DISABLED, ZTP proceeds
     Note over TB,DB: identical to today's SONiC — no voucher, no mutual TLS
 ```
-*Figure 13: Legacy provisioning when the secure option is disabled*
+*Figure 14 : Legacy provisioning when the secure option is disabled*
 
 **Step by step:**
 
@@ -1197,7 +1154,7 @@ The work is delivered in phases so that Phase 1 provides real security on today'
 | Phase | Objective | Trust depth | Hardware requirement | Where specified |
 |:-----:|:----------|:------------|:---------------------|:----------------|
 | **1** | Trusted ZTP in SONiC userspace | Voucher and certificate (file-based identity) | None — runs today | This HLD |
-| **2** | Hardware-rooted identity | TPM 2.0 and IEEE 802.1AR IDevID/LDevID with EST | TPM and factory IDevID ([O3](#20-open-items)) | Follow-up HLD |
+| **2** | Hardware-rooted identity | TPM 2.0 and IEEE 802.1AR IDevID/LDevID with EST | TPM and factory IDevID | Follow-up HLD |
 | **Out Of Scope** | Close the ONIE image-download window | Authenticated NOS image retrieval | ONIE support | Future (opencomputeproject/onie) |
 
 Phases 1 and 2 deepen the *trust model*; OutOfPhase work item widens *coverage* to the pre-SONiC boot stage. They are independent and may proceed in parallel.
@@ -1778,5 +1735,182 @@ Unit tests run with the client mocked, so they require no live TPM, network, or 
 
 ---
 
-### 16. Open/Action items - if any 
-To Be Updated
+### 16. Open/Action items 
+
+---
+
+### 17. Appendix A : PKI Trust Hierarchy
+
+Trusted ZTP relies on a Public Key Infrastructure (PKI) consisting of two Certificate Authorities (CAs): a **Vendor CA** owned by the hardware manufacturer and an **Operator CA** owned by the network operator. Understanding which CA signs which artifacts makes the trust model straightforward.
+
+### Certificate Authorities
+
+#### Vendor CA
+
+The Vendor CA is typically kept offline and protected within a secure signing environment.
+
+Responsibilities:
+
+- Signs per-device identities (IDevID) in Phase 2.
+- Signs RFC 8366 ownership vouchers.
+- Acts as the root of trust for device ownership validation.
+
+Every switch ships with the Vendor CA certificate pre-installed, enabling it to verify ownership vouchers immediately during onboarding.
+
+#### Operator CA
+
+The Operator CA is managed by the organization that owns and operates the network.
+
+Responsibilities:
+
+- Signs bootstrap server TLS certificates.
+- Issues operational device certificates (LDevID).
+- Supports enrollment and renewal workflows.
+
+The device learns to trust the Operator CA through one of two trust models:
+
+- **Trusted-Server Model**: Operator CA is pre-installed during manufacturing.
+- **Voucher-Anchored Model**: The ownership voucher authorizes establishment of trust in the Operator CA.
+
+---
+
+### Device Certificates
+
+Trusted ZTP uses two device identities.
+
+| Certificate | Purpose | Lifetime | Owner |
+|-------------|----------|----------|--------|
+| **IDevID** | Permanent factory identity | Long-lived | Hardware manufacturer |
+| **LDevID** | Operational identity used after onboarding | Renewable | Network operator |
+
+#### IDevID (Initial Device Identity)
+
+- Permanent device identity.
+- Unique per switch.
+- Factory installed.
+- TPM-protected in Phase 2.
+- Used to establish device authenticity.
+
+#### LDevID (Local Device Identity)
+
+- Issued during onboarding.
+- Represents current device ownership.
+- Used for day-to-day authentication.
+- Renewable throughout device lifecycle.
+
+---
+
+### 18. Appendix B : How Phase1 works without a TPM
+
+Most current whitebox platforms do not provide a factory-installed TPM-backed IDevID. To enable secure onboarding on existing hardware, Phase 1 introduces a file-based identity model that provides equivalent functionality.
+
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 26}, 'themeVariables': {'fontSize': '12px'}}}%%
+flowchart LR
+    subgraph FAC["1 · Factory / staging"]
+        direction TB
+        VCA["Vendor CA"]:::ext -->|"signs, serial in cert"| CERT["device cert + key<br/>(per unit)"]:::new
+        ANCH["vendor CA + bootstrap.json<br/>baked into image"]:::new
+    end
+    subgraph SW["2 · On the switch: /etc/sonic/tztp/"]
+        direction TB
+        DK["device.crt / device.key<br/>(file, 0600)"]:::new
+        VC["trust/vendor-ca.pem"]:::new
+        BJ["bootstrap.json"]:::new
+    end
+    subgraph BOOT["3 · At first boot"]
+        direction TB
+        ID["device cert identifies<br/>the switch by serial"]:::use
+        VV["vendor CA verifies<br/>the voucher"]:::use
+        SB["voucher serial matches<br/>device-cert serial"]:::use
+    end
+    FAC ==> SW ==> BOOT
+
+    classDef ext fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
+    classDef new fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
+    classDef use fill:#d6eaf8,stroke:#2471a3,color:#154360
+```
+
+*Figure 15 : Phase-1 realization: a per-unit device certificate and CA files stand in for the TPM.*
+
+#### Step 1: Factory or Staging Provisioning
+
+During manufacturing or staging:
+
+- A unique certificate and private key are generated for each switch.
+- The device serial number is embedded into the certificate Subject or SAN.
+- The certificate is signed by the Vendor CA.
+- The SONiC image is prepared with:
+  - Vendor CA certificate
+  - Optional Operator CA certificate
+  - `bootstrap.json` trust plane
+
+#### Step 2: Files Installed on the Device
+
+The device receives the following files:
+
+```text
+/etc/sonic/tztp/
+├── device.crt
+├── device.key
+├── trust/
+│   └── vendor-ca.pem
+└── bootstrap.json
+```
+
+##### File Security
+```text
+device.key
+Owner: root
+Permissions: 0600
+```
+
+This ensures only privileged processes can access the private key.
+
+#### Step 3: First Boot Validation
+
+During onboarding:
+
+1. The device certificate identifies the switch.
+2. The Vendor CA validates the ownership voucher.
+3. The voucher contains the expected device serial number.
+4. The switch verifies that:
+   - Voucher serial number matches device certificate serial number.
+5. Secure onboarding proceeds only if validation succeeds.
+
+---
+
+**Phase 1 Trust Flow**
+
+```text
+Factory / Staging
+-----------------
+Vendor CA
+     |
+     +--> Signs Device Certificate
+     |
+     +--> Vendor CA + bootstrap.json
+          embedded into image
+
+
+Device Files
+------------
+device.crt
+device.key
+vendor-ca.pem
+bootstrap.json
+
+
+First Boot
+----------
+device certificate identifies switch
+           |
+vendor-ca verifies ownership voucher
+           |
+voucher serial matches device serial
+           |
+secure onboarding continues
+```
+---
+
