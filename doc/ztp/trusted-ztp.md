@@ -434,17 +434,17 @@ Before a factory-fresh switch accepts any configuration, five things indicated b
 | **Device identity** | *"Is it for this switch, and can I prove which switch I am?"* | 
 | **Trust-plane integrity** | *"Can I trust the trust plane itself?"* |
 
-##### 01. **Trust plane** 
+#### 01. **Trust plane** 
 A brand-new switch has an empty CONFIG_DB (which ZTP is about to fill), so it cannot read its security settings from there. Instead it reads them from a small, read-only file placed on the switch at the factory or during staging, /etc/sonic/tztp/bootstrap.json. This file specify enforced mode setting.
 
-##### 02. **Trust model** 
+#### 02. **Trust model** 
 RFC 8572 offers two ways to accept bootstrapping data; the trust plane's trust_model picks one:
 
 - **Trusted-server (unsigned data).** The switch is pre-loaded at the factory with the CA it should trust and validates the server's TLS certificate against it. It accepts the data only after the server is authenticated. Simple, but each factory image is tied to one owner's CA.
 
 - **Voucher-anchored (signed data, RFC 8572).** The switch accepts data from *any* server — even one whose TLS certificate it cannot validate — *as long as the data is signed and backed by an ownership voucher*. This lets one generic, owner-independent factory image work anywhere, so it is the **recommended default**.
  
-##### 03. **Trust chain** 
+#### 03. **Trust chain** 
 
 On the signed-data path the switch verifies below five links, each against something it already trusts:
 
@@ -459,9 +459,85 @@ On the signed-data path the switch verifies below five links, each against somet
 - **Config is for this switch** — the voucher's **serial number** must equal the switch's own serial.
 
 
-##### 04. **Device identity**
+#### 04. **Device identity**
 
-##### 05. **Trust-plane integrity**
+Trusted ZTP requires every device to possess a unique identity that is cryptographically tied to the switch's hardware serial number. The implementation differs between Phase 1 and Phase 2, but the core requirement remains the same: **each switch must have its own unique cryptographic identity**.
+
+A shared certificate or common key embedded into a software image is not acceptable because it would break the association between the device identity and the hardware serial number, undermining ownership verification.
+
+##### Phase 1: File-Based Device Identity
+Phase 1 uses a software-based identity model to ensure compatibility with existing hardware platforms.
+
+Characteristics:
+- A unique device certificate is provisioned during manufacturing or staging.
+- The certificate is stored as a file on the device.
+- The certificate serial number matches the hardware serial number.
+- Authentication is based on ownership-voucher validation rather than mutual TLS.
+- The private key is stored on disk and is therefore considered **software-strength** protection.
+
+##### Phase 2: TPM-Based IDevID
+Phase 2 introduces a hardware-rooted identity using a TPM (Trusted Platform Module) 2.0.
+
+Characteristics:
+- Uses a factory-installed IEEE 802.1AR Initial Device Identity (IDevID).
+- The private key is generated and stored inside the TPM.
+- The private key never leaves the TPM.
+- Supports mutual TLS authentication.
+- Provides hardware-backed protection for device credentials.
+
+##### Identity Requirements
+Regardless of the implementation phase:
+- Every switch must have a unique identity.
+- Identity must be bound to the device serial number.
+- Shared certificates or image-wide keys are prohibited.
+- Ownership validation depends on the uniqueness of the device identity.
+
+Because Phase 1 uses file-based identities, Trusted ZTP does **not require** client-certificate authentication during initial onboarding. Ownership is instead established through ownership-voucher verification.
+
+
+#### 05. **Trust-plane integrity**
+
+Trust-Plane Integrity determines whether the device can trust the security configuration and trust anchors that guide the onboarding process. This includes components such as:
+
+- `bootstrap.json`
+- Trusted CA certificates
+- Ownership-validation configuration
+- Trust anchors used during secure provisioning
+
+The protection mechanism differs between Phase 1 and Phase 2.
+
+##### Phase 1: Secure Boot-Based Trust
+In Phase 1, trust-plane artifacts such as `bootstrap.json` and CA certificates are protected primarily through operating system file permissions.
+
+The security model assumes that **UEFI Secure Boot** protects the integrity of the installed SONiC image by preventing unauthorized modification of:
+- System software
+- Trusted ZTP components
+- Factory trust configuration
+- Embedded vendor trust anchors
+
+Under this model:
+- The trust plane is considered trustworthy because the booted image is trusted.
+- Attackers cannot silently replace trust anchors or onboarding policies without modifying the signed software image.
+- Physical attacks against the device are considered out of scope.
+
+##### Phase 2: TPM-Measured Trust Plane
+Phase 2 strengthens trust-plane protection by integrating with a TPM (Trusted Platform Module).
+
+In this model:
+- Trust-plane artifacts are measured during the boot process.
+- Measurements are stored in TPM Platform Configuration Registers (PCRs).
+- Any modification to trust-plane content changes the TPM measurements.
+- Tampering becomes detectable through attestation and integrity verification mechanisms.
+
+Protected elements include:
+- `bootstrap.json`
+- Trust anchors
+- Device identity material
+- Critical onboarding configuration
+
+Phase 1 trusts the onboarding security configuration because it is packaged within a Secure Boot-protected software image. This provides basic integrity protection but assumes the device has not been physically modified. Phase 2 strengthens this model by measuring the trust plane into a TPM, making unauthorized modifications detectable and providing hardware-backed assurance that onboarding trust settings have not been tampered with.
+
+---
 
 ### 8.2 tZTP Components & Data Flow
 
