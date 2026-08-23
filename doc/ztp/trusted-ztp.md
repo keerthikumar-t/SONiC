@@ -623,7 +623,7 @@ Responsible for loading the read-only `bootstrap.json` file during startup. It d
     "static_servers": ["https://bootstrap.example.net"],
     "trust_model": "voucher-anchored",
     "require_ownership_voucher": true,
-    "tls_minimum_version": "TLSv1.3",
+    "tls_supported_version": "TLSv1.3",
     "identity_source": "file",
     "device_cert": "/etc/sonic/tztp/device.crt",
     "device_key": "/etc/sonic/tztp/device.key",
@@ -1172,7 +1172,7 @@ The configuration is modeled using YANG and stored in `CONFIG_DB`. The final sto
     "enforce": true,
     "trust_model": "voucher-anchored",
     "require_ownership_voucher": true,
-    "tls_minimum_version": "TLSv1.3",
+    "tls_supported_version": "TLSv1.3",
     "identity_source": "file",
     "enrollment_retry_count": 3,
     "enrollment_retry_delay_sec": 30
@@ -1189,7 +1189,7 @@ The configuration is modeled using YANG and stored in `CONFIG_DB`. The final sto
 | `trust_model` | `voucher-anchored` | Defines the trust establishment mechanism. Supported values are `voucher-anchored` and `trusted-server`. |
 | `require_ownership_voucher` | `true` | Requires a valid ownership voucher during onboarding. Cannot be disabled when Trusted ZTP is enabled. |
 | `dhcp_option_source` | `option_143` | Specifies the DHCP option used for bootstrap server discovery. `option_67` is not allowed when Trusted ZTP is enabled. |
-| `tls_minimum_version` | `TLSv1.3` | Defines the minimum TLS version permitted for secure communications. TLS 1.2 and earlier versions are rejected. |
+| `tls_supported_version` | `TLSv1.3` | Defines the minimum TLS version permitted for secure communications. TLS 1.2 and earlier versions are rejected. |
 | `identity_source` | `file` | Specifies the source of device identity credentials. Supported values are `file` (Phase 1) and `tpm` (Phase 2). |
 | `allow_file_based_idevid` | `true` | Determines whether file-based IDevID credentials are allowed. Set to `false` to require TPM-backed device identity. |
 | `enrollment_retry_count` | `3` | Maximum number of retries for onboarding operations that return a retryable (`SUSPEND`) status. |
@@ -1331,7 +1331,7 @@ module sonic-tztp {
                  available. Tried in order; RFC 8572 redirects are honoured.";
           }
 
-          leaf tls_minimum_version {
+          leaf tls_supported_version {
               type enumeration {
                   enum "TLSv1.2";
                   enum "TLSv1.3";
@@ -1726,40 +1726,6 @@ The bootstrap server is configured to extract the serial number from the client 
    Post-Script
 ```
 
-#### Example Onboarding Profile
-For a device whose certificate contains:
-```text
-serialNumber = first-serial-number
-```
-
-the server may return:
-```text
-first-onboarding-profile
-├── Boot Image
-│   └── first-boot-image.img
-│       └── SHA-256 verification hash
-│
-├── Configuration
-│   └── first-configuration.xml
-│
-├── Pre-Configuration Script
-│   └── first-pre-configuration-script.sh
-│
-└── Post-Configuration Script
-    └── first-post-configuration-script.sh
-```
-
-#### Why This Design Matters
-This model provides several important security benefits:
-
-| Benefit | Explanation |
-|----------|-------------|
-| Unique identity per switch | Every device has its own certificate and serial number. |
-| Cryptographic authentication | The identity is protected by certificate-based authentication rather than relying on easily spoofed values such as IP addresses. |
-| Automated onboarding | The bootstrap server automatically determines which onboarding profile belongs to a device. |
-| Ownership verification | Ownership vouchers reference the same serial number, allowing the server and device to verify ownership consistently. |
-| Supports both Phase 1 and Phase 2 | The same identity model works with file-based certificates (Phase 1) and TPM-backed IDevIDs (Phase 2). |
-
 #### Phase 1 vs Phase 2
 The onboarding logic remains exactly the same in both phases.
 
@@ -1772,7 +1738,6 @@ The onboarding logic remains exactly the same in both phases.
 
 The only change is where the private key is stored. The identity model and trust flow remain unchanged.
 
-**Summary**
 Trusted ZTP identifies a switch by reading the serial number embedded inside its device certificate. During mutual TLS onboarding, the bootstrap server extracts this serial number and uses it to retrieve the correct onboarding profile, including the boot image, configuration, and scripts assigned to that switch. 
 **This serial-number-based identity model is the foundation of the entire Trusted ZTP design and works consistently across both file-based (Phase 1) and TPM-backed (Phase 2) implementations.**
 
