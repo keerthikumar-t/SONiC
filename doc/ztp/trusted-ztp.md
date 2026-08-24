@@ -53,7 +53,7 @@ Key design principles include:
 - **Reuse of proven technology**: The design leverages an existing, mature, and permissively licensed RFC 8572 implementation rather than developing a new security-sensitive provisioning protocol from scratch.
 - **Standards-based onboarding**: Device onboarding, ownership validation, and secure configuration delivery follow the RFC 8572 specification.
 - **Backward compatibility**: Existing SONiC ZTP deployments continue to operate unchanged.
-- **Secure-by-option deployment**: Trusted ZTP is disabled by default and must be explicitly enabled by operators.
+- **Secure-by-option deployment**: Trusted ZTP is disabled by default and must be explicitly enabled.
 - **Reduced implementation risk**: Reusing established components minimizes development complexity and limits exposure to security vulnerabilities in custom protocol implementations.
 
 Key design Goals of Trusted ZTP aims to:
@@ -61,13 +61,13 @@ Key design Goals of Trusted ZTP aims to:
 1. Provide cryptographically verifiable device onboarding.
 2. Establish device ownership through secure ownership vouchers.
 3. Protect onboarding communications using modern TLS-based security.
-4. Integrate with SONiC's existing provisioning workflow with minimal disruption.
+4. Integrate with SONiC's existing provisioning workflow with minimal/no disruptions.
 5. Preserve compatibility with current deployment models while enabling organizations to adopt stronger security controls when required.
 
 
 ### 3. Scope  
 
-This document describes **Phase 1** of Trusted Zero Touch Provisioning (tZTP) for SONiC userspace. tZTP extends the existing `ztpd` daemon with cryptographic security without breaking backward compatibility.
+This document describes **Phase 1** of Trusted Zero Touch Provisioning (tZTP) for SONiC userspace. tZTP extends the existing `sonic-ztp` with cryptographic security with full backward compatibility support.
 
 
 **In scope — Phase 1 (this document):**
