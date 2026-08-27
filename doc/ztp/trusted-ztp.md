@@ -966,8 +966,6 @@ The impact per repository and data store is summarised below.
 | `sonic-yang-models` | New model | `sonic-tztp.yang` with the security constraints |
 | `sonic-utilities` | New CLI | `show` / `config tztp` commands |
 | `sonic-mgmt` | New tests | Trusted ZTP test plan |
-| CONFIG_DB | New table | `TZTP` configuration |
-| STATE_DB | New tables | `TZTP` status and audit |
 | SAI / orchagent / syncd / ASIC | **None** | No data-plane or hardware-abstraction impact |
 
 
