@@ -792,11 +792,9 @@ The selected policy is recorded in audit logs and system logs for traceability.
 #### 05. PayloadMapper
 **Type:** New 
 
-Converts the validated provisioning payload received through SZTP into SONiC's standard provisioning format, `ztp_data.json`, allowing the existing ZTP framework to process it without modification.
+The sztp-agent explicitly supports downloading artifacts securely over HTTPS/FTPS and verifying them locally using SHA-256 hashes. Hence, every artifact named by the onboarding information — boot image, configuration, and scripts — shall be downloaded and integrity-verified from sztp client and that shall be referenced in the generated provisioning data (i.e. ztp_data.json) via local file:// path.
 
-- RFC 8572's `configuration` field is opaque, so the SONiC config is carried in a small, versioned **`sonic-config`** envelope that names its format
-- `PayloadMapper` reads `format` and rewrites the payload into SONiC's normal `ztp_data.json`, reusing the existing plugins
-- The result is a standard `ztp_data.json`
+PayloadMapper does this operation of converting the validated provisioning payload received through SZTP into SONiC's standard provisioning format, `ztp_data.json`, allowing the existing ZTP framework to process it without modification. The generated provisioning data shall contain local file:// path and no remote URL.
 
 Sample Format:
 ```json
