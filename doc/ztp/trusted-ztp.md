@@ -544,8 +544,7 @@ Regardless of the implementation phase:
 - Shared certificates or image-wide keys are prohibited.
 - Ownership validation depends on the uniqueness of the device identity.
 
-Because Phase 1 uses file-based identities, Trusted ZTP does **not require** client-certificate authentication during initial onboarding. Ownership is instead established through ownership-voucher verification.
-
+Bootstrapt Server Certificate Validation required in Trusted Server (Direct) mode and Owner Voucher would be required in Voucher Anchor mode.
 
 #### 05. **Trust-plane integrity**
 
