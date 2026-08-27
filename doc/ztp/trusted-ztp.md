@@ -396,6 +396,8 @@ flowchart TB
         DHCP["DHCP<br/>(Option 143 / Option 67)"]
         BOOT["RFC 8572<br/>Bootstrap Server"]
     end
+    style EXT fill:#e8f5e9,stroke:#4caf50,stroke-width:3px,color:#000
+
 
     %% Hardware Platform
     subgraph HW["Hardware Platform"]
