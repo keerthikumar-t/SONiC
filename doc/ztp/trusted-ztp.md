@@ -76,7 +76,7 @@ This document describes **Phase 1** of Trusted Zero Touch Provisioning (tZTP) fo
 - Validation of the ownership voucher, the owner certificate, and the CMS signature over the onboarding payload, before any configuration is applied.
 - Integration with the existing `sonic-ztp` engine and its plugin model, so that validated payloads are applied through today's provisioning path.
 - An immutable first-boot trust plane (`bootstrap.json`), support for both RFC 8572 trust models, and trusted-time handling for clock-less first boot.
-- Configuration expressed as a YANG model, operational visibility in STATE_DB with a durable audit trail, and CLI.
+- Operational visibility in STATE_DB with a durable audit trail, and supports through the CLI.
 - DHCP Option 143 (`sztp-redirect`, RFC 8572 §8.1 structured URI list) strict enforcement in trusted mode
 - A secure-enable enforcement mode that disables the legacy insecure discovery and transport paths.
 - Full backward compatibility with existing ZTP deployments, in secure-disable mode.
@@ -241,7 +241,7 @@ tZTP (Trusted ZTP) is a security extension to the existing ZTP mechanism. It imp
 
 Crucially, **once the payload is validated, nothing about how SONiC applies configuration changes**. The validated payload is translated into SONiC's normal provisioning data and handed to the existing engine and plugins. The new work is confined to *establishing trust and obtaining a verified payload* — not to reimplementing provisioning.
 
-#### The Trsted ZTP flow in four moves
+#### The Trusted ZTP flow in four moves
 
 ```mermaid
 sequenceDiagram
