@@ -1591,7 +1591,6 @@ Trusted ZTP runs only during initial provisioning (factory default or an explici
 
 - **Requires a bootstrap server.** The mature server (Watsen) is proprietary; `google/open-sztp` is the open-source candidate but is young and needs an interoperability gate.
 - **Phase 1 device identity is file-based.** It relies on a pre-installed device certificate and operator-provisioned trust anchors; it does not establish identity from a hardware root of trust until Phase 2.
-- **ONIE residual attack window.** Trusted ZTP secures SONiC-userspace provisioning. The earlier ONIE-stage NOS image download remains unsecured. This is currently out-of-scope of this proposal.
 - **DHCPv6-only networks.** If only option 136 is available, client support must be confirmed; otherwise enforced mode may be restricted to dual-stack in Phase 1 .
 - **Reused client is written in Go.** SONiC invokes it as a subprocess, which adds a Go build and runtime artifact to the image.
 - **Phase-1 identity and trust plane are software-strength** — a per-unit file certificate and filesystem-protected trust plane. Hardware-rooted identity and a measured trust plane are Phase 2.
