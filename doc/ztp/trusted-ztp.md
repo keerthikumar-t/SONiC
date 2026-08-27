@@ -1155,9 +1155,7 @@ The work is delivered in phases so that Phase 1 provides real security on today'
 
 #### 11.1.  Runtime Configuration
 
-Trusted ZTP runtime configuration extends the first-boot trust configuration and adds operational controls that can be managed after deployment.
-
-The configuration is modeled using YANG and stored in `CONFIG_DB`. The final storage location is still under discussion and may either use a dedicated `TZTP` table or extend the existing ZTP configuration framework.
+Trusted ZTP runtime configuration extends the first-boot trust configuration and adds operational controls that can be managed after deployment. The final storage location is still under discussion and may either use a dedicated `TZTP` table or extend the existing ZTP configuration framework.
 
 ##### Example Configuration
 
