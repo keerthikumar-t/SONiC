@@ -1149,8 +1149,6 @@ The work is delivered in phases so that Phase 1 provides real security on today'
 | **2** | Hardware-rooted identity | TPM 2.0 and IEEE 802.1AR IDevID/LDevID with EST | TPM and factory IDevID | Follow-up HLD |
 | **Out Of Scope** | Close the ONIE image-download window | Authenticated NOS image retrieval | ONIE support | Future (opencomputeproject/onie) |
 
-Phases 1 and 2 deepen the *trust model*; OutOfPhase work item widens *coverage* to the pre-SONiC boot stage. They are independent and may proceed in parallel.
-
 ---
 
 ### 11. Configuration and management 
