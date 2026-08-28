@@ -1779,6 +1779,25 @@ If all cryptographic checks pass, the session transitions into the **Trusted Pha
 - The device processes the configuration, executes scripts, and installs required OS images.
 - Finally, it uses the secure channel to send a formal progress report back to the server, confirming the setup succeeded.
 
+
+### Stakeholder (Switch, Vendor/Manufacturer, Operator) Security Artifacts:
+
+In voucher-anchor mode, transport-level security alone is insufficient (e.g., the bootstrap server uses an operator domain CA not trusted by the switch, or data is delivered via untrusted channels/redirects). Trust is established at the payload level using an Ownership Voucher signed by the manufacturer's signing authority (MASA).
+
+**Switch (Device):**
+- IDevID Certificate & Private Key: Used for mTLS client authentication and to identify its unique serial number.
+- Manufacturer / MASA Trust Anchor: Pre-installed root CA certificate used specifically to cryptographically verify the Ownership Voucher issued by the manufacturer.
+
+**Manufacturer (MASA - Manufacturer Authorized Signing Authority):**
+- MASA Private Key & Certificate: Used to sign generated RFC 8366 Ownership Vouchers for devices.
+- Device Sales/Ownership Records: Maps physical device serial numbers / IDevID details to specific customer orders.
+
+**Operator:**
+- Ownership Voucher: Signed by the MASA, linking the specific switch serial number to the operator's Pinned Domain Certificate (PDC).
+- Owner Certificate & Private Key: Issued by the operator's internal domain CA, matching the PDC pinned inside the ownership voucher.
+- Signed Conveyed Information (Payload): The onboarding payload (configurations, scripts, image paths) wrapped in a Cryptographic Message Syntax (CMS) signature created using the operator's Owner Private Key.
+- Server TLS Certificate & Private Key: Standard server certificate used to encrypt the RESTCONF transport stream (does not need to be trusted by the switch beforehand in this mode).
+
 ---
 
 ### 19. Appendix E : Device Configuration using Trusted Server Mode
@@ -1965,9 +1984,23 @@ bootstrap-complete
 ssh-host-keys
 trust-anchor-certs
 ```
-
 ##### Purpose
 - Confirm successful onboarding.
 - Provide operational trust information to the Bootstrap Server.
+
+### Stakeholder (Switch, Vendor/Manufacturer, Operator) Security Artifacts:
+In trusted-server mode, the switch relies directly on transport-layer security (TLS mTLS authentication). The switch trusts the bootstrap server because the server's TLS certificate is signed by a CA that the switch already trusts (typically the manufacturer's CA or a pre-configured CA trust anchor).
+
+**Switch (Device):**
+- IDevID Certificate & Private Key: Initial Device Identifier (factory-installed X.509 certificate and private key, typically protected by a TPM/Secure Element) used to authenticate itself to the bootstrap server via mTLS.
+- Manufacturer Trust Anchor (CA Certificate): Pre-installed root/intermediate CA certificate(s) used to authenticate the TLS certificate presented by the manufacturer's or operator's bootstrap server.
+
+**Manufacturer:**
+- Manufacturer CA (Root/Intermediate): Private key and public certificate used to issue IDevID certificates for devices and to issue/sign server TLS certificates for trusted bootstrap servers.
+
+**Operator:**
+- Server TLS Certificate & Private Key: Issued by a CA chain that resolves back to the manufacturer's trust anchor stored on the switch.
+- Bootstrapping Data / Conveyed Information: The unsigned payload containing onboarding instructions (boot image download URIs, hashes, pre/post-configuration scripts, initial NOS configuration).
+- Device Identity Records: List of allowed serial numbers / IDevID identities for mTLS client authorization.
 
 ---
