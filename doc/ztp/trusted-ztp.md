@@ -152,7 +152,7 @@ sequenceDiagram
 
     S->>C: config reload
 ```
-*Figure 1 — Current ZTP - Initial Provisioning Sequence*
+*Figure 1 — Current SONiC-ZTP Provisioning Sequence*
 
 Current SONiC ZTP supports few security features, but it does not provide a standards-based mechanism for establishing trust between a factory-fresh device and the provisioning server. Because a factory-fresh device has no built-in mechanism to verify the identity of the provisioning server or confirm that the received payload is intended for it, onboarding remains vulnerable to man-in-the-middle and rogue-server attacks. 
 
@@ -195,13 +195,43 @@ _"DHCP provides a pointer, but I verify the server, verify the device, validate 
 
 This establishes a cryptographically verifiable trust relationship between the device, the operator, and the provisioning infrastructure.
 
+```mermaid
+sequenceDiagram
+    participant Switch
+    participant DHCP
+    participant BootstrapServer
+
+    Note over Switch,DHCP: 1. Find Bootstrap Server
+    Switch->>DHCP: DHCP Discovery
+    DHCP-->>Switch: Bootstrap URL (Option 143)
+
+    Note over Switch,BootstrapServer: 2. Prove Trust Both Ways
+    Switch->>BootstrapServer: mTLS Handshake
+    BootstrapServer-->>Switch: Server Certificate
+    Switch->>BootstrapServer: Client Certificate
+
+    Note over Switch,BootstrapServer: 3. Receive Signed Instructions
+    BootstrapServer-->>Switch: Signed Redirect OR Onboarding Info
+
+    Note over Switch,BootstrapServer: 4. Verify, Apply, Report
+    Switch->>Switch: Verify Hash
+    Switch->>Switch: Write Config
+    Switch->>Switch: Run Scripts
+    Switch-->>BootstrapServer: Report Outcome
+```
+*Figure 2 : Secure ZTP Provisioning Sequence*
+
+The sequence follows,
+- Find the bootstrap server
+- Prove trust both ways (Device <--> Bootstrap Server)
+- Receive signed instructions (redirect or onboarding information)
+- Verify, apply, report
+
 #### Naming — tZTP vs sZTP
 
 The feature is named **tZTP (Trusted ZTP)** rather than **sZTP (secure ZTP)** to emphasize that here primary contribution is not merely securing the communication channel, but establishing an end-to-end trust framework for device onboarding. Trusted ZTP introduces device identity verification, operator ownership validation, and cryptographically verifiable onboarding information, creating a chain of trust from the device manufacturer through the network operator to the provisioned device.
 
 In this context, "secure" describes the protection of the communication channel, while "trusted" describes confidence in the entire onboarding process, including the identities of participating entities, the ownership relationship, and the authenticity and integrity of the provisioning data.
-
-_**One-line Note: tZTP emphasizes end-to-end trust in device onboarding, while "secure" refers only to protecting the communication channel.**_
 
 ---
 
@@ -231,81 +261,30 @@ _**One-line Note: tZTP emphasizes end-to-end trust in device onboarding, while "
 *Figure 2 : The Big Picture — The Players of Secure Zero Touch Provisioning sequence*
 
 
-#### The Trusted ZTP flow in four moves
-
-```mermaid
-sequenceDiagram
-    participant Switch
-    participant DHCP
-    participant BootstrapServer
-
-    Note over Switch,DHCP: 1. Find Bootstrap Server
-    Switch->>DHCP: DHCP Discovery
-    DHCP-->>Switch: Bootstrap URL (Option 143)
-
-    Note over Switch,BootstrapServer: 2. Prove Trust Both Ways
-    Switch->>BootstrapServer: mTLS Handshake
-    BootstrapServer-->>Switch: Server Certificate
-    Switch->>BootstrapServer: Client Certificate
-
-    Note over Switch,BootstrapServer: 3. Receive Signed Instructions
-    BootstrapServer-->>Switch: Signed Redirect OR Onboarding Info
-
-    Note over Switch,BootstrapServer: 4. Verify, Apply, Report
-    Switch->>Switch: Verify Hash
-    Switch->>Switch: Write Config
-    Switch->>Switch: Run Scripts
-    Switch-->>BootstrapServer: Report Outcome
-```
-*Figure 3 : Trusted SONiC Bootstrapping Sequence with Mutual TLS*
-
-##### 01. Find the bootstrap server
-
-DHCP hands the switch a single thing: a **URL** (via option 143). Here DHCP is treated as *untrusted* — just a pointer, nothing more.
-
-##### 02. Prove trust both ways
-
-The switch and the server open a **mutual-TLS** connection. Each presents a certificate the other checks. Only if both sides are satisfied does the conversation continue.
-
-##### 03. Receive signed instructions
-
-The server sends **"conveyed information"** — a signed package that's either:
-
-- A **redirect** ("go ask this other server instead"), or
-- **Onboarding info** (the actual boot image + config + scripts)
-
-##### 04. Verify, apply, report
-
-The switch downloads the image, **checks its hash**, **writes the config**, **runs pre/post scripts**, and **tells the server** each stage's outcome.
-
-
-
 ### 6. Requirements
 
 ### 6.1 Functional Requirements
 
 | # | Requirement | Priority |
 |:--|:------------|:--------:|
-| FR-1 | With Trusted ZTP disabled (`trusted_mode=false`, the default), the existing ZTP behaviour is completely unchanged. | Must |
-| FR-2 | The device shall perform RFC 8572 secure bootstrapping against one or more bootstrap servers. | Must |
-| FR-3 | The device shall be identifiable to the server through its ownership voucher's serial binding. Where a device identity certificate is available — an IEEE 802.1AR IDevID (Phase 2) or a per-unit file certificate (Phase 1) — it shall be presented for TLS client authentication. RFC 8572 does **not** require mutual TLS on the signed-data path. | Must |
-| FR-4 | The server shall be authenticated either by validating its certificate against a pinned trust anchor (trusted-server model) or by validating the ownership voucher and then retroactively verifying the server (voucher-anchored model, RFC 8572 §5.4). | Must |
-| FR-5 | The device shall validate the RFC 8366 ownership voucher, the owner certificate, and the CMS signature over the onboarding information before applying any part of the payload. | Must |
+| FR-1 | Trusted ZTP should be fully backward compatible. When disabled (trusted_mode=false, the default), the system follows the existing SONiC ZTP provisioning process with no functional or operational changes. | Must |
+| FR-2 | The device shall perform RFC 8572 secure bootstrapping against bootstrap servers. | Must |
+| FR-3 | The device shall be identifiable to the bootstrap server through its Device Certificate — it shall be presented for TLS client authentication. | Must |
+| FR-4 | The bootstrap server shall be authenticated either by validating its certificate against a pinned trust anchor (trusted-server model) or by validating the ownership voucher  (voucher-anchored model). | Must |
+| FR-5 | The device shall validate the ownership voucher, the owner certificate, and the CMS signature over the onboarding information before applying any part of the payload. | Must |
 | FR-6 | On any trust-validation failure, the device shall apply no configuration, image, or script (fail-closed). | Must |
-| FR-7 | The device shall accept an SZTP redirect and follow the referenced bootstrap servers (bounded to prevent loops). | Must |
-| FR-8 | The device shall send RFC 8572 progress reports to a **trusted** bootstrap server (report-progress is defined only over the authenticated connection to a trusted server; it is not available on the signed-data-from-untrusted-server path). | Must |
+| FR-7 | The device shall support RFC 8572 redirects and follow authorized bootstrap server references, while enforcing limits to prevent redirect loops. | Must |
+| FR-8 | The device shall send RFC 8572 progress reports to a **trusted** bootstrap server (report-progress is defined only over the authenticated connection to a trusted server; it is not available on the voucher anchor model). | Must |
 | FR-9 | Validated onboarding information shall be applied through the existing `sonic-ztp` engine and plugins, with configuration backup and rollback on failure. | Must |
 | FR-10 | In enforced mode, the SZTP URL shall be accepted only from DHCP option 143/136; legacy option 67/239 discovery shall be rejected. | Must |
-| FR-11 | The initial trust posture shall be read from a read-only `bootstrap.json` at first boot; when `enforce=true` and the trust plane is missing or invalid, the device shall fail closed. | Must |
-| FR-12 | The device shall establish trusted time on a clock-less first boot, anchoring to the voucher `created-on` timestamp when the real-time clock is invalid. | Must |
+| FR-11 | The device shall read its initial trust configuration from a read-only bootstrap.json during first boot. | Must |
+| FR-12 | The device shall establish a trusted time reference during first boot. If the real-time clock is not valid, the voucher created-on timestamp shall be used as the initial trust anchor. | Must |
 | FR-13 | TLS 1.3 shall be the minimum negotiated version; TLS 1.2 and below shall be rejected. | Must |
 | FR-14 | All SONiC modules shall interact with the RFC 8572 client only through a single adapter, so that the client can be replaced without changes elsewhere. | Must |
-| FR-15 | Trusted ZTP status, trust results, and an audit trail shall be published to STATE_DB, mirrored durably to the system log, and exposed via CLI. | Must |
+| FR-15 | Trusted ZTP status, trust validation results, and audit records shall be published to STATE_DB, persistently logged in the system log, and exposed through the CLI. | Must |
 | FR-16 | (Phase 2) The device shall support TPM-resident IDevID identity and LDevID enrollment/renewal via EST. | Should |
 | FR-17 | Any additional files delivered with the onboarding information shall be covered by the same CMS signature over the conveyed information and shall be rejected if that signature does not verify. | Should |
-| FR-18 | The network-facing bootstrapping and parsing (TLS, voucher, CMS, JSON) shall run with reduced privilege — dropped capabilities and a sandbox — separated from the root engine that applies configuration. | Must |
-| FR-19 | Trusted time derived from a voucher shall never move the clock backward past the last persisted known-good time (a monotonic floor), to prevent clock-rollback replay. | Must |
-| FR-20 | Execution of onboarding pre/post-configuration scripts shall be governed by an `allow_onboarding_scripts` policy; when enabled, scripts run with the engine's (root) privilege. | Should |
+| FR-18 | Network-facing functions such as TLS, voucher processing, CMS validation, and JSON parsing shall run with reduced privileges and be isolated from the root-level configuration engine. | Must |
 
 ### 6.2 Non-Functional Requirements
 
@@ -317,8 +296,7 @@ The switch downloads the image, **checks its hash**, **writes the config**, **ru
 | NFR-4 | The reused client is vendored at a pinned version; its transitive-dependency licenses are audited in CI | Required |
 | NFR-5 | Phase 1 functions on hardware without a TPM or factory IDevID | Required |
 | NFR-6 | The feature is unit-testable without a live TPM, network, or bootstrap server (adapter mocked) | Required |
-| NFR-7 | Audit records survive cold reboot and power loss | Required |
-| NFR-8 | End-to-end provisioning completes within a typical maintenance window | < 5 minutes |
+| NFR-7 | End-to-end provisioning completes within a typical maintenance window | < 5 minutes |
 
 ---
 
