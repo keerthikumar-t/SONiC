@@ -556,9 +556,6 @@ Trust-Plane Integrity determines whether the device can trust the security confi
 - Ownership-validation configuration
 - Trust anchors used during secure provisioning
 
-Phase 1 trusts the onboarding security configuration because it is packaged within a Secure Boot-protected software image. This provides basic integrity protection but assumes the device has not been physically modified. 
-Phase 2 strengthens this model by measuring the trust plane into a TPM, making unauthorized modifications detectable and providing hardware-backed assurance that onboarding trust settings have not been tampered with.
-
 ---
 
 ### 8.2 Trusted ZTP Components Overview
