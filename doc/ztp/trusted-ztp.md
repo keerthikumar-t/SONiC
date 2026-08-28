@@ -10,7 +10,6 @@
 
 **Target release:** To be assigned by the SONiC TSC
 
-
 ---
 
 ## Table of Contents
@@ -35,74 +34,63 @@
 18. [Appendix C](#18-appendix-c-how-phase1-works-without-a-TPM)
 19. [Appendix D](#19-appendix-d-device-configuration-using-voucher-anchor-mode)
 20. [Appendix E](#20-appendix-e-device-configuration-using-trusted-server-mode)
-    
+
+---
+
 ### 1. Revision History  
 
 | Version | Date | Author | Description |
 |:-------:|:-----|:-------|:------------|
 | 1.0 | 2026-08-06 | T Keerthi Kumar, Sandeep K | Initial draft. |
 
+---
 
 ### 2. About This Document  
 
-This High-Level Design (HLD) introduces **Trusted ZTP (tZTP)**, a standards-based and cryptographically secure onboarding solution for SONiC built on **RFC 8572 Secure Zero Touch Provisioning (SZTP)**.
-
-The design follows a conservative and low-risk approach that prioritizes security, maintainability, and backward compatibility. Rather than replacing SONiC's existing `sonic-ztp` framework, Trusted ZTP extends and enhances it with standards-compliant security controls.
+This High-Level Design introduces **Trusted Zero Touch Provisioning (tZTP)**, a standards-based, cryptographically secure onboarding solution for SONiC, built on **RFC 8572** Secure Zero Touch Provisioning. The design follows a simple approach that prioritizes security, maintainability, and backward compatibility.
 
 Key design principles include:
-
-- **Augmentation rather than replacement**: Trusted ZTP builds on the existing `sonic-ztp` service instead of introducing an entirely new onboarding framework.
-- **Reuse of proven technology**: The design leverages an existing, mature, and permissively licensed RFC 8572 implementation rather than developing a new security-sensitive provisioning protocol from scratch.
-- **Standards-based onboarding**: Device onboarding, ownership validation, and secure configuration delivery follow the RFC 8572 specification.
-- **Backward compatibility**: Existing SONiC ZTP deployments continue to operate unchanged.
+- **Augmentation rather than replacement**: Trusted ZTP builds upon the existing sonic-ztp service instead of introducing an entirely new onboarding framework.
+- **Reuse of proven technology**: The design leverages a mature, existing, and permissively licensed RFC 8572 implementation rather than developing a new security-sensitive provisioning protocol from scratch.
+- **Standards-based onboarding**: Device onboarding, ownership validation, and secure configuration delivery adhere to the **RFC 8572** specification.
+- **Backward compatibility**: Existing SONiC ZTP deployments continue to operate without modification.
 - **Secure-by-option deployment**: Trusted ZTP is disabled by default and must be explicitly enabled.
-- **Reduced implementation risk**: Reusing established components minimizes development complexity and limits exposure to security vulnerabilities in custom protocol implementations.
 
-Key design Goals of Trusted ZTP aims to:
-
-1. Provide cryptographically verifiable device onboarding.
-2. Establish device ownership through secure ownership vouchers.
-3. Protect onboarding communications using modern TLS-based security.
-4. Integrate with SONiC's existing provisioning workflow with minimal/no disruptions.
-5. Preserve compatibility with current deployment models while enabling organizations to adopt stronger security controls when required.
-
+---
 
 ### 3. Scope  
 
-This document describes **Phase 1** of Trusted Zero Touch Provisioning (tZTP) for SONiC userspace. tZTP extends the existing `sonic-ztp` with cryptographic security with full backward compatibility support.
+This document describes **Phase 1** of **Trusted Zero Touch Provisioning (tZTP)** for SONiC NOS. It extends the existing `sonic-ztp` with cryptographic security with full backward compatibility support.
+
+**In Scope — Phase 1(this document):**
+- RFC 8572 based secure bootstrapping (i.e. process of bringing a bare-metal "white box" switch from its factory default state into a fully operational network node) support for a SONiC device.
+- Verification of bootstrap server ownership (for example, using operator certificates or ownership vouchers) and validation of onboarding payload integrity before applying any configuration to the device
+- Seamless integration with the existing `sonic-ztp` engine and plugin framework, enabling validated payloads to be applied through the established provisioning workflow.
+- A secure enforcement mode that disables legacy insecure discovery and communication methods. Along with full backward compatibility with existing ZTP deployments.
+- Operational visibility through STATE_DB, with audit logs and CLI support.
+- Support for file-based device certificates on devices without a hardware TPM (interim solution in Phase1).
 
 
-**In scope — Phase 1 (this document):**
+**In Scope — Phase 2:**
+Design interfaces are defined in this HLD. Detailed design will be covered in a future HLD.
+- Support for hardware-based device identity using TPM 2.0 and IEEE 802.1AR (IDevID/LDevID).
+- Certificate enrollment and renewal for device identities.
 
-- RFC 8572 secure bootstrapping on the SONiC device (the *pledge*), over authenticated TLS 1.3 to a bootstrap server (mutual TLS with the IDevID in Phase 2).
-- Validation of the ownership voucher, the owner certificate, and the CMS signature over the onboarding payload, before any configuration is applied.
-- Integration with the existing `sonic-ztp` engine and its plugin model, so that validated payloads are applied through today's provisioning path.
-- An immutable first-boot trust plane (`bootstrap.json`), support for both RFC 8572 trust models, and trusted-time handling for clock-less first boot.
-- Operational visibility in STATE_DB with a durable audit trail, and supports through the CLI.
-- DHCP Option 143 (`sztp-redirect`, RFC 8572 §8.1 structured URI list) strict enforcement in trusted mode
-- A secure-enable enforcement mode that disables the legacy insecure discovery and transport paths.
-- Full backward compatibility with existing ZTP deployments, in secure-disable mode.
-- Operation on hardware **without** a TPM, using a file-based device certificate.
 
-**In scope — Phase 2 (design seams defined here; full design in a follow-up HLD):**
-
-- Hardware-rooted device identity using TPM 2.0 and IEEE 802.1AR IDevID/LDevID, with certificate enrollment and renewal.
-
-**Out of scope:**
-
-- The bootstrap server implementation itself, which runs off the device.
-- Securing the ONIE-stage NOS image download. 
+**Out of Scope:**
+- Implementation of the external secure bootstrap server.
+- Security of NOS image downloads during the ONIE installation stage. 
  
 ---
+
 ### 4. Definitions/Abbreviations 
 
 | Term | Definition |
 |------|-----------|
 | **tZTP** | Trusted Zero Touch Provisioning — this feature |
-| **ZTP** | Zero Touch Provisioning — existing SONiC mechanism (unsecured) |
+| **ZTP** | Zero Touch Provisioning — existing SONiC mechanism |
 | **SZTP** | Secure Zero Touch Provisioning — RFC 8572 standard that tZTP implements |
-| **IDevID** | Initial Device Identifier — factory-installed, TPM-backed per IEEE 802.1AR-2018 |
-| **LDevID** | Local Device Identifier — operational cert issued at provisioning per IEEE 802.1AR-2018 |
+| **IDevID** | Initial Device Identifier — factory-installed |
 | **mTLS** | Mutual TLS — TLS with both client and server certificate verification |
 | **EST** | Enrollment over Secure Transport — RFC 7030 |
 | **CMS** | Cryptographic Message Syntax — RFC 5652, used for signed config bundles |
