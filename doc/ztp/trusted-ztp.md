@@ -92,31 +92,24 @@ Design interfaces are defined in this HLD. Detailed design will be covered in a 
 | **SZTP** | Secure Zero Touch Provisioning — RFC 8572 standard that tZTP implements |
 | **IDevID** | Initial Device Identifier — factory-installed |
 | **mTLS** | Mutual TLS — TLS with both client and server certificate verification |
-| **EST** | Enrollment over Secure Transport — RFC 7030 |
-| **CMS** | Cryptographic Message Syntax — RFC 5652, used for signed config bundles |
+| **CMS** | Cryptographic Message Syntax - RFC 5652 - a standard structure used to digitally sign, authenticate, encrypt, or digest arbitrary message data |
 | **TPM** | Trusted Platform Module 2.0 — hardware security element |
 | **ONIE** | Open Network Install Environment — bare-metal switch bootloader |
 | **PKI** | Public Key Infrastructure |
 | **CA** | Certificate Authority |
-| **CSR** | Certificate Signing Request (PKCS#10) |
-| **ztpd** | ZTP Daemon — existing SONiC Python daemon (`sonic-ztp` package) |
 | **RFC 8572** | Secure Zero Touch Provisioning |
-| **RFC 9646** | CSR in SZTP Bootstrapping Request (Oct 2024) |
+| **RFC 5652** | Cryptographic Message Syntax |
 | **RFC 8366** | Voucher Artifact for Bootstrapping Protocols |
-| **CONFIG_DB** | SONiC configuration database (Redis instance 4) |
-| **STATE_DB** | SONiC operational state database (Redis instance 6) |
-| **Pledge** | The device being provisioned — here, the SONiC switch. |
-| **Bootstrap server** | The RFC 8572 server that returns redirect or onboarding information to the pledge. |
-| **Onboarding information** | The signed payload delivered to the pledge: boot image reference, configuration, and optional scripts. |
-| **Ownership voucher** | A signed artifact (RFC 8366) that binds a device to its rightful owner. |
-| **Trusted-server model** | RFC 8572 trust where the pledge already holds the owner/CA trust anchor. |
-| **Voucher-anchored model** | RFC 8572 trust where the server is verified *after* connecting, by validating the voucher. |
-| **Owner / owner certificate** | The entity that owns the deployed device and signs its onboarding information; identified by the voucher's `pinned-domain-cert`. |
-| **pinned-domain-cert** | The certificate pinned inside the ownership voucher (RFC 8366) that identifies the owner the device must trust. |
+| **Pledge** | The device being provisioned — here, the SONiC switch |
+| **Bootstrap server** | The RFC 8572 server that returns redirect or onboarding information to the pledge |
+| **Onboarding information** | The signed payload delivered to the pledge: boot image reference, configuration, and optional scripts |
+| **Trusted-server model** | RFC 8572 trust where the pledge already holds the owner/CA trust anchor |
+| **Voucher-anchored model** | RFC 8572 trust where the server is verified *after* connecting, by validating the voucher |
+| **Ownership voucher** | A signed artifact (RFC 8366) that binds a device to its owner |
+| **Owner Certificate** | A X.509 certificate that binds an owner identity to a public key, which a device can use to validate a signature over the conveyed information artifact |
+| **pinned-domain-cert** | The certificate pinned inside the ownership voucher (RFC 8366) that identifies the owner, the device must trust. |
 | **Manufacturer anchor** | The manufacturer signing trust anchor, baked in at the factory, used to verify the ownership voucher. |
-| **CMS SignedData** | The RFC 5652 signed structure wrapping the onboarding information; its signer must be the owner certificate. |
 | **Canonical Architecture** | An architecture that uses a single, standard, and shared model for data or design. |
-| **HLD** | High Level Design document |
 
 ---
 
