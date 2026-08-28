@@ -298,26 +298,48 @@ In this context, "secure" describes the protection of the communication channel,
 | NFR-6 | The feature is unit-testable without a live TPM, network, or bootstrap server (adapter mocked) | Required |
 | NFR-7 | End-to-end provisioning completes within a typical maintenance window | < 5 minutes |
 
+
 ---
 
-### 7. Architecture Design 
 
-Trusted ZTP is an additive, management-plane feature. This section places it in the SONiC architecture, zooms into its internal components and secure data flow in next sectinos.
+### 7. Trusted ZTP Architecture Overview
 
-Trusted ZTP operates entirely in the SONiC **management plane**. It has no interaction with the ASIC, SAI, `orchagent`, or `syncd`. It reads and writes CONFIG_DB and STATE_DB, reads trust material from the filesystem, and — in Phase 2 — uses the TPM. Its only external interaction is an outbound TLS session to the bootstrap server. 
+Trusted ZTP is an additive management-plane feature that enhances SONiC's existing ZTP framework with secure onboarding capabilities. This section describes how Trusted ZTP fits into the SONiC architecture and introduces the key components and secure data flows involved in the solution.
 
-Because the ZTP process handles data received from potentially untrusted networks during initial device boot, the network-facing bootstrap and file-parsing components are designed to run with limited privileges and within a sandboxed environment i.e.
+Trusted ZTP operates entirely within the SONiC management plane. It does not interact with the ASIC, SAI, orchagent, or syncd. Instead, it:
+- Reads and writes configuration and operational state through CONFIG_DB and STATE_DB.
+- Reads trust material, such as certificates and vouchers, from the local filesystem.
+- Uses TPM-based device identity in Phase 2.
+- Establishes outbound TLS connections to authorized bootstrap servers.
 
-- Network-sourced data is processed in a restricted environment with minimal privileges.
-- The bootstrap and parsing components are isolated from critical system functions.
-- The root-level configuration engine is separated from the network-facing components.
-- If a vulnerability is exploited in the provisioning or parsing process, the impact is limited by the sandbox and privilege restrictions.
-- This reduces the risk of unauthorized access to the underlying operating system during the initial provisioning phase.
+As Trusted ZTP processes information received from external networks during initial device onboarding, security and isolation are key design considerations.
 
+**Secure Execution Model:**
 
-#### Footprint on the SONiC Architecture
+To reduce the risk associated with processing untrusted network data:
 
-The SONiC community's canonical architecture organises the system as application containers interacting through a **central Redis database**, above the SWSS / `syncd` / SAI stack and the ASIC. Trusted ZTP fits into that picture with a deliberately small footprint: it extends the existing **native `sonic-ztp` host service**, adds a CLI, and adds tables to **CONFIG_DB** and **STATE_DB**. Everything below the database — SWSS, `syncd`, SAI, and the ASIC — **is untouched**.
+- Network-facing data is processed in a sandboxed, reduced-privilege environment.
+- Bootstrap, TLS, voucher-validation, CMS-validation, and parsing functions are isolated from critical system functions.
+- The privileged configuration engine that applies configurations remains separate from network-facing components.
+- Any vulnerability in the onboarding or parsing process is contained by sandbox and privilege boundaries.
+- This minimizes the risk of unauthorized access to the underlying operating system during the provisioning phase.
+
+### 7.1 Footprint on the SONiC Architecture
+
+The SONiC architecture is built around application services that communicate through a centralized Redis database, above the SWSS, syncd, SAI, and ASIC layers.
+
+Trusted ZTP has a deliberately small architectural footprint. The solution:
+
+- Extends the existing native sonic-ztp host service.
+- Adds Trusted ZTP management and monitoring commands to the CLI.
+- Introduces configuration and operational state tables in CONFIG_DB and STATE_DB.
+- Reuses the existing SONiC provisioning workflow and plugin framework.
+
+No changes are required to:
+- SWSS
+- syncd
+- SAI
+- ASIC hardware and forwarding pipeline
 
 ```mermaid
 flowchart TB
@@ -400,7 +422,9 @@ flowchart TB
     TZTP -. Phase 2 .-> TPM
 ```
 
-*Figure 4 : Trusted ZTP mapped onto the standard SONiC architecture. The change is confined to the native ZTP service, the CLI, and two database tables; the SWSS / syncd / SAI / ASIC stack is untouched*
+*Figure 3 : Trusted ZTP SONiC Architecture*
+
+---
 
 ### 8. High-Level Design 
 
