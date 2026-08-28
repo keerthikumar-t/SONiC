@@ -219,7 +219,7 @@ sequenceDiagram
     Switch->>Switch: Run Scripts
     Switch-->>BootstrapServer: Report Outcome
 ```
-*Figure 2 : Secure ZTP Provisioning Sequence*
+*Figure 2 : RFC 8572 Secure ZTP Provisioning Sequence*
 
 The sequence follows,
 - Find the bootstrap server
@@ -298,9 +298,7 @@ In this context, "secure" describes the protection of the communication channel,
 | NFR-6 | The feature is unit-testable without a live TPM, network, or bootstrap server (adapter mocked) | Required |
 | NFR-7 | End-to-end provisioning completes within a typical maintenance window | < 5 minutes |
 
-
 ---
-
 
 ### 7. Trusted ZTP Architecture Overview
 
@@ -433,11 +431,197 @@ flowchart TB
 
 ### 8. High-Level Design 
 
-Within the `sonic-ztp` service, Trusted ZTP introduces a secure front-end architecture where each module is responsible for a specific function. This separation of responsibilities improves maintainability, security, and flexibility.
+Trusted ZTP extends the existing sonic-ztp service with a secure onboarding framework. The key architectural principle is that, **Trusted ZTP** establishes **trust**, while the **existing SONiC ZTP** framework performs **provisioning**. Once onboarding information has been authenticated and validated, it is handed to the existing ztp-engine.py and plugin framework without modifying the provisioning workflow. This approach minimizes changes to SONiC while adding standards-based secure onboarding capabilities. 
 
-The implementation reuses the RFC 8572 Secure Zero Touch Provisioning client (`sztp-agent`), which is isolated behind a dedicated adapter layer. This design ensures that the SZTP client can be upgraded, modified, or replaced without affecting other components of the Trusted ZTP framework.
+The design introduces a set of modular components, each responsible for a specific function. This separation of responsibilities improves maintainability, security, and flexibility. It reuses the RFC 8572 Secure Zero Touch Provisioning client (sztp-agent) and encapsulates it behind a dedicated adapter layer. This abstraction allows the underlying SZTP client to be upgraded, modified, or replaced without impacting the rest of the Trusted ZTP framework.
 
-#### Zero Touch Provisioning using 'sztp-agent' 
+### 8.1 Trusted ZTP Components Overview
+
+Trusted ZTP enhances the existing SONiC ZTP service by introducing a small set of lightweight components that add secure onboarding capabilities while preserving the existing provisioning workflow.
+
+**Components include**,
+
+1. TrustBootstrap
+2. Discovery
+3. SztpClientAdapter
+4. TimeAnchor
+5. PayloadMapper
+6. AuditSink
+7. IdentityManager
+8. sztp-agent (reused - 3rd party)
+9. ztp-engine.py and existing plugins (reused - SONiC NOS)
+
+The seven new modules provide trust establishment, identity management, validation, auditing, and integration functions, while the reused components continue to perform RFC 8572 processing and provisioning execution.
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 26}, 'themeVariables': {'fontSize': '12px'}}}%%
+flowchart TB
+    BJSON["bootstrap.json"]:::io --> TB["TrustBootstrap"]:::new
+    DHCP["DHCP opt 143/136"]:::io --> DISC["Discovery"]:::new
+    TB --> DISC
+    DISC --> ADP["SztpClientAdapter"]:::new
+    ADP --> AGT["sztp-agent<br/>(3rd party opensource)"]:::new
+    AGT <-->|"TLS"| BS["Bootstrap server<br/>(off-device)"]:::io
+    AGT -->|"payload"| ADP
+    ADP --> TA["TimeAnchor"]:::new
+    ADP --> PM["PayloadMapper"]:::new
+    ADP --> IM["IdentityManager<br/>(Phase 2)"]:::new
+    ADP --> AS["AuditSink"]:::new
+    PM -->|"ztp_data.json"| ENG["ztp-engine<br/>(reused)"]:::reuse
+    ENG --> CDB["CONFIG_DB"]:::io
+    AS --> SDB["STATE_DB + syslog"]:::io
+
+    classDef new fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
+    classDef reuse fill:#d6eaf8,stroke:#2471a3,color:#154360
+    classDef io fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
+```
+*Figure 4 : Trusted ZTP internal components Overview*
+*The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
+
+- The device reads its trust posture from **bootstrap.json** and obtains SZTP discovery information through **DHCP options 143/136**.
+- **Discovery** and **TrustBootstrap** initialize the trusted onboarding workflow.
+- The **SztpClientAdapter** acts as the single integration point between SONiC and the external RFC 8572 client.
+- The **sztp-agent** establishes an **mTLS** connection with the operator-owned **Bootstrap Server**, validates vouchers and CMS-signed onboarding information, and retrieves the onboarding payload.
+- The validated payload is returned to the adapter, which:
+   1. Anchors trusted time using **TimeAnchor**.
+   2. Maps onboarding data into SONiC-native structures using **PayloadMapper**.
+   3. Manages device identity functions through **IdentityManager** (Phase 2).
+   4. Publishes trust and audit information through **AuditSink**.
+- The resulting **ztp_data.json** is passed to the existing **ztp-engine**, preserving SONiC's current provisioning workflow.
+- The reused ZTP engine applies configuration through **CONFIG_DB**.
+- Trust status, validation results, and onboarding audit records are published to **STATE_DB** and persisted in **syslog**.
+
+
+**Component Responsibilities,**
+
+**1. TrustBootstrap**
+
+Loads and validates the initial trust configuration from bootstrap.json during first boot. It establishes the device's trust posture, trust model, operational mode, and trust anchors before onboarding begins.
+
+`bootstrap.json` is a small, **read-only** file placed on the switch at the factory or during staging, `/etc/sonic/tztp/bootstrap.json`, only `TrustBootstrap` module reads this file.
+
+Example format:
+```json
+{
+  "tztp_bootstrap": {
+    "schema_version": "1.0",
+    "trusted_mode": true,
+    "enforce": true,
+    "discovery": ["dhcp-opt143", "dhcp-opt136", "static"],
+    "trust_model": "voucher-anchored", /* OR trusted-server */
+    "identity_source": "file",
+    "device_cert": "/etc/sonic/tztp/device.crt",
+    "device_key": "/etc/sonic/tztp/device.key",
+    "trust_anchors_path": "/etc/sonic/tztp/trust/",
+    "sztp_client": "sztp-agent",
+    "sztp_client_version_range": ">=0.2.0,<0.3.0"
+  }
+}
+```
+
+**2. Discovery**
+
+Obtains bootstrap-server information through DHCP and initiates the secure onboarding workflow. DHCP-provided data is treated as untrusted and used only as a discovery mechanism.
+
+Supported DHCP Options,
+```text
+Option Code: 143/136
+Purpose: Carries the SZTP bootstrap server information (typically a list of HTTPS URLs).
+Transport: DHCPv4/DHCPv6
+Format: Encoded as a DHCP option payload containing one or more bootstrap server URIs as defined by RFC 8572 implementations.
+```
+
+**3. SztpClientAdapter**
+
+Provides a stable abstraction layer between SONiC and the RFC 8572 client (sztp-agent). This adapter isolates implementation-specific details and allows the underlying SZTP client to be upgraded or replaced with minimal impact on the rest of the system.
+
+SztpClientAdapter executes the `sztp-agent` client and translates the results into existing SONiC provisioning outcomes, so the existing handling simply works:
+
+```mermaid
+flowchart TD
+
+    A["sztp-agent Completed"]
+
+    B{"Exit Code"}
+
+    C["0"]
+    D["2"]
+    E["Other Non-Zero"]
+
+    F["Payload Validated"]
+    G["Server Unreachable<br/>DHCP Pending<br/>Redirect Pending"]
+    H["Voucher / TLS / Signature<br/>Validation Failure"]
+
+    I["SUCCESS"]
+    J["SUSPEND"]
+    K["FAILED"]
+
+    L["Map & Apply Configuration"]
+    M["Retry After Configured Delay"]
+    N["Record Failure Reason<br/>Apply Nothing"]
+
+    A --> B
+
+    B --> C
+    B --> D
+    B --> E
+
+    C --> F
+    D --> G
+    E --> H
+
+    F --> I
+    G --> J
+    H --> K
+
+    I --> L
+    J --> M
+    K --> N
+```
+*Figure 5 : SztpClientAdapter Exit Code Handling*
+
+**4. TimeAnchor**
+
+Establishes trusted time during onboarding. When a valid real-time clock is unavailable, it derives an initial trusted time reference from voucher information and prevents clock rollback attacks.
+
+Factory-fresh switches may boot without a valid real-time clock and default to an incorrect timestamp. Since certificate and voucher validation depend on accurate time, Trusted ZTP provides a mechanism to establish trusted time during onboarding.
+
+**5. PayloadMapper**
+
+Converts validated RFC 8572 onboarding information into the format expected by the existing SONiC ZTP framework, enabling seamless reuse of current provisioning logic.
+
+**6. AuditSink**
+
+Records onboarding events, trust-validation outcomes, and operational status. Information is published to STATE_DB, persisted in system logs, and exposed through the CLI.
+
+**7. IdentityManager**
+
+Manages device identity and authentication credentials. In Phase 1, it supports file-based device certificates. In Phase 2, it integrates with TPM-based IDevID/LDevID identities.
+
+**8. sztp-agent (Reused)**
+
+The RFC 8572 Secure Zero Touch Provisioning client responsible for secure communication, voucher processing, CMS validation, mutual TLS, and retrieval of onboarding information.
+
+**9. ztp-engine.py and Existing Plugins (Reused)**
+
+The existing SONiC provisioning engine and plugin framework that perform software installation, configuration deployment, script execution, and other provisioning tasks after onboarding information has been validated.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ```mermaid
 sequenceDiagram
@@ -477,7 +661,7 @@ sequenceDiagram
     end
 ```
 
-*Figure 5 : End-to-End Provisioning using 'sztp-agent'*
+*Figure 4 : Proposed Trusted ZTP Provisioning Sequence with 3rd party 'sztp-agent'*
 
 - Each module has a single, well-defined responsibility.
 - The architecture separates security-critical functions from other processing tasks.
