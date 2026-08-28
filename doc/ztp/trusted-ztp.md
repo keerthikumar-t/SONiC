@@ -582,14 +582,120 @@ flowchart TD
 
 **4. TimeAnchor**
 
-Establishes trusted time during onboarding. When a valid real-time clock is unavailable, it derives an initial trusted time reference from voucher information and prevents clock rollback attacks.
+Factory-fresh switches may boot without a valid real-time clock and default to an incorrect timestamp. Since certificate and voucher validation depend on accurate time, Trusted ZTP provides a mechanism to establish trusted time during onboarding. It derives an initial trusted time reference from voucher information and prevents clock rollback attacks.
 
-Factory-fresh switches may boot without a valid real-time clock and default to an incorrect timestamp. Since certificate and voucher validation depend on accurate time, Trusted ZTP provides a mechanism to establish trusted time during onboarding.
+**Responsibilities,**
+- Detect Invalid Time
+ 	1. Determine whether the current system time is valid.
+    2. Trigger trusted-time establishment when the clock is unavailable or incorrect.
+- Establish Trusted Time
+    1. Use the validated ownership voucher's `created-on` timestamp as an initial trusted time reference.
+    2. Enable certificate and trust validation during first boot.
+ - Prevent Clock Rollback
+    1. Enforce a monotonic trusted-time baseline.
+    2. Prevent the system clock from moving backward beyond the last persisted known-good time.
+- Revalidate After Time Synchronization
+    1. Revalidate trust decisions after accurate time is obtained through NTP or another trusted time source.
 
 **5. PayloadMapper**
 
-Converts validated RFC 8572 onboarding information into the format expected by the existing SONiC ZTP framework, enabling seamless reuse of current provisioning logic.
+Converts validated RFC 8572 onboarding information into the format expected by the existing SONiC ZTP framework, enabling seamless reuse of current provisioning logic. The RFC 8572 client (sztp-agent) securely downloads onboarding artifacts and validates their integrity using the hashes provided in the onboarding information. Before any provisioning data is generated, all referenced artifacts, such as software images, configuration files, and scripts, must be downloaded and successfully verified. 
 
+The PayloadMapper then translates the validated onboarding payload into a standard SONiC ztp_data.json file. Instead of referencing remote URLs, the generated provisioning data references only locally downloaded artifacts using file:// paths.
+
+**Responsibilities,**
+- Consume Validated Onboarding Information
+- Reference Verified Local Artifacts
+- Generate SONiC Provisioning Data
+- Maintain Provisioning Compatibility
+
+**Example RFC 8572 Onboarding Information Payload**
+```json
+{
+  "ietf-sztp-conveyed-info:onboarding-information": {
+    "boot-image": {
+      "os-name": "VendorOS",
+      "os-version": "17.2R1.6",
+      "download-uri": [
+        "https://example.com/path/to/image/file"
+      ],
+      "image-verification": [
+        {
+          "hash-algorithm": "ietf-sztp-conveyed-info:sha-256",
+          "hash-value": "ba:ec:cf:a5:67:82:b4:10:77:c6:67:a6:22:ab:7d:50:04:a7:8b:8f:0e:db:02:8b:f4:75:55:fb:c1:13:b2:33"
+        }
+      ]
+    },
+    "configuration-handling": "merge",
+    "pre-configuration-script": "base64encodedscript==",
+    "configuration": "base64encodedconfig==",
+    "post-configuration-script": "base64encodedscript=="
+  }
+}
+```
+
+**Example Generated SONiC ZTP Information Payload**
+```json
+{
+  "ztp": {
+    "restart-ztp-no-config": false,
+    "restart-ztp-on-failure": false,
+    "halt-on-failure": true,
+    "ignore-result": false,
+
+    "00-tztp-pre-script": {
+      "plugin": { "name": "provisioning-script" },
+      "ignore-section-data": true,
+      "provisioning-script": {
+        "url": { "source": "file:///var/lib/ztp/tztp/artifacts/pre.sh" }
+      }
+    },
+    "01-tztp-firmware": {
+      "install": {
+        "url": { "source": "file:///var/lib/ztp/tztp/artifacts/sonic.bin" },
+        "set-default": true
+      },
+      "reboot-on-success": true
+    },
+    "02-tztp-config": {
+      "clear-config": true,
+      "save-config": true,
+      "url": { "source": "file:///var/lib/ztp/tztp/artifacts/config_db.json" }
+    },
+    "99-tztp-post-script": {
+      "plugin": { "name": "provisioning-script" },
+      "ignore-section-data": true,
+      "provisioning-script": {
+        "url": { "source": "file:///var/lib/ztp/tztp/artifacts/post.sh" }
+      }
+    }
+  }
+}
+```
+
+**High-Level Functional Mapping:**
+```text
+RFC 8572 Onboarding Information
+│
+├── boot-image.download-uri
+│      └── SONiC firmware installer section
+│
+├── boot-image.image-verification
+│      └── Verified by tZTP before ZTP generation
+│
+├── pre-configuration-script
+│      └── 00-tztp-pre-script
+│
+├── configuration
+│      └── 02-tztp-config
+│
+├── configuration-handling
+│      └── clear-config true/false
+│
+└── post-configuration-script
+       └── 99-tztp-post-script
+```
+	   
 **6. AuditSink**
 
 Records onboarding events, trust-validation outcomes, and operational status. Information is published to STATE_DB, persisted in system logs, and exposed through the CLI.
@@ -600,28 +706,57 @@ Manages device identity and authentication credentials. In Phase 1, it supports 
 
 **8. sztp-agent (Reused)**
 
-The RFC 8572 Secure Zero Touch Provisioning client responsible for secure communication, voucher processing, CMS validation, mutual TLS, and retrieval of onboarding information.
+The RFC 8572 Secure Zero Touch Provisioning client (sztp-agent) is a reused open-source component responsible for the standards-based secure onboarding functions used by Trusted ZTP.
 
-**9. ztp-engine.py and Existing Plugins (Reused)**
+Rather than implementing a new provisioning protocol, Trusted ZTP leverages the mature RFC 8572 implementation provided by sztp-agent to perform the security-critical operations required during device onboarding. To maintain architectural flexibility, **sztp-agent** is accessed through the **SztpClientAdapter** rather than directly by SONiC components. This abstraction allows the RFC 8572 client implementation to be upgraded, customized, or replaced with minimal impact on the rest of the system.
 
-The existing SONiC provisioning engine and plugin framework that perform software installation, configuration deployment, script execution, and other provisioning tasks after onboarding information has been validated.
+```mermaid
+flowchart TD
 
+    A["SONiC ZTP Engine"]
 
+    B["SztpClientAdapter"]
 
+    C["Launch subprocess"]
 
+    D["sztp-agent bootstrap"]
 
+    F["device.crt"]
+    G["device.key"]
+    H["trust-anchors"]
+    I["TLS 1.3"]
+    J["voucher-anchored"]
 
+    K["RFC 8572 Processing"]
 
+    L["onboarding.json"]
+    M["Exit Code"]
 
+    A --> B
+    B --> C
+    C --> D
 
+    F --> D
+    G --> D
+    H --> D
+    I --> D
+    J --> D
 
+    D --> K
+    K --> L
+    K --> M
+```
+*Figure 6 : RFC 8572 SZTP-Agent Security Processing Architecture*
 
+**Responsibilities,**
+Within the Trusted ZTP architecture, sztp-agent serves as the security-processing engine responsible for trust establishment and onboarding validation. It performs the cryptographic and protocol-specific operations required by RFC 8572, including:
 
-
-
-
-
-
+- Server authentication.
+- Device authentication.
+- Ownership validation.
+- Payload authenticity verification.
+- Payload integrity verification.
+- Secure onboarding information retrieval.
 
 ```mermaid
 sequenceDiagram
@@ -661,13 +796,35 @@ sequenceDiagram
     end
 ```
 
-*Figure 4 : Proposed Trusted ZTP Provisioning Sequence with 3rd party 'sztp-agent'*
+*Figure 7 : Trusted ZTP Provisioning Sequence with 'sztp-agent'*
 
-- Each module has a single, well-defined responsibility.
-- The architecture separates security-critical functions from other processing tasks.
-- The RFC 8572 client (`sztp-agent`) is encapsulated behind an adapter interface.
-- Changes to the SZTP client have minimal impact on the rest of the system.
-- The modular design simplifies maintenance, testing, and future enhancements.
+
+**9. ztp-engine.py and Existing Plugins (Reused)**
+
+The existing SONiC provisioning engine and plugin framework that perform software installation, configuration deployment, script execution, and other provisioning tasks after onboarding information has been validated.
+
+**Role in Trusted ZTP,**
+
+Trusted ZTP does not modify the existing provisioning engine. Instead, once onboarding information has been authenticated, validated, and converted into SONiC's native ztp_data.json format, the resulting provisioning data is handed to the existing ZTP engine for execution.
+
+This allows Trusted ZTP to reuse SONiC's proven provisioning framework while limiting new functionality to trust establishment, validation, and payload preparation.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ### 8.1 Key Design Principle: Establishing Trust
 
