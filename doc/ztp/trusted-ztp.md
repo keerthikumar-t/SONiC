@@ -28,12 +28,11 @@
 12. [Warmboot and Fastboot Design Impact](#12-warmboot-and-fastboot-design-impact)
 13. [Restrictions/Limitations](#14-restrictions-/-limitations)
 14. [Testing Requirements](#15-testing-requirements)
-15. [Open/Action items](#16-open-/-action-items)
-16. [Appendix A](#16-appendix-a-the-core-concept-of-trusted-ztp-Device-Identity-=-Serial-Number-Embedded-in-a-Certificate)
-17. [Appendix B](#17-appendix-b-pki-trust-hierarchy)
-18. [Appendix C](#18-appendix-c-how-phase1-works-without-a-TPM)
-19. [Appendix D](#19-appendix-d-device-configuration-using-voucher-anchor-mode)
-20. [Appendix E](#20-appendix-e-device-configuration-using-trusted-server-mode)
+15. [Appendix A](#16-appendix-a-the-core-concept-of-trusted-ztp-Device-Identity-=-Serial-Number-Embedded-in-a-Certificate)
+16. [Appendix B](#17-appendix-b-pki-trust-hierarchy)
+17. [Appendix C](#18-appendix-c-how-phase1-works-without-a-TPM)
+18. [Appendix D](#19-appendix-d-device-configuration-using-voucher-anchor-mode)
+19. [Appendix E](#20-appendix-e-device-configuration-using-trusted-server-mode)
 
 ---
 
@@ -812,17 +811,24 @@ This allows Trusted ZTP to reuse SONiC's proven provisioning framework while lim
 
 ### 8.2 Mode Selection Design 
 
-Trusted ZTP is **off by default and must be opted into**. At the very start of provisioning, the switch decides which path to take — secure or legacy — and, in one specific setting, may fall back from secure to legacy. This has to be exactly right, because a switch that has not opted in must behave just like SONiC does today.
+Trusted ZTP is **disabled by default** and must be explicitly enabled. At the start of the provisioning process, the device determines whether to use the **Trusted ZTP** workflow or the existing **legacy ZTP** workflow. This decision is critical to ensure that devices that have not opted into Trusted ZTP continue to behave exactly as they do today.
 
-**Where the choice comes from.** The switch looks for `trusted_mode` in the trust-plane file - bootstrap.json (new switch) or in CONFIG_DB (already-configured switch). If it is set nowhere, it is **false**. Together with the `enforce` flag, this gives three modes:
+**Determining the Operating Mode,**
+The device reads the `trusted_mode` and `enforce` settings from the trust configuration:
 
+- `bootstrap.json` during initial onboarding of a factory-fresh device.
+- `CONFIG_DB` on an already provisioned device.
+
+If `trusted_mode` is not configured, it defaults to **false**.
+
+Based on the values of trusted_mode and enforce, the device operates in one of three modes.
 | `trusted_mode` | `enforce` | Behaviour |
 |:--------------:|:---------:|:----------|
 | false | — | **Default.** Legacy ZTP only; no change from today. |
 | true | false | **Transition mode.** Try Trusted ZTP first; fall back to legacy ZTP only if the secure path cannot even be started. For staged rollout; *not fully secure*. |
 | true | true | **Secure-only.** Legacy option-67/239 discovery and unauthenticated transports are switched off; any missing trust material or failed check stops provisioning. Blocks downgrade attacks. |
 
-The `TRUST_FALLBACK_LEGACY` audit event marks a transition-mode fallback. The full start-up decision — including both the default and the transition-mode fallback — is shown below.
+The full start-up decision — including both the default and the transition-mode fallback — is shown below.
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 26}, 'themeVariables': {'fontSize': '12px'}}}%%
@@ -1018,12 +1024,9 @@ Trusted ZTP runtime configuration extends the first-boot trust configuration and
   "tztp": {
     "trusted_mode": true,
     "enforce": true,
-    "trust_model": "voucher-anchored",
-    "require_ownership_voucher": true,
+    "trust_model": "trusted-server",
     "tls_supported_version": "TLSv1.3",
-    "identity_source": "file",
-    "enrollment_retry_count": 3,
-    "enrollment_retry_delay_sec": 30
+    "identity_source": "file"
   }
 }
 ```
@@ -1034,21 +1037,14 @@ Trusted ZTP runtime configuration extends the first-boot trust configuration and
 |------------|---------------|-------------|
 | `trusted_mode` | `false` | Master switch for Trusted ZTP. When disabled, the device operates using legacy SONiC ZTP only. |
 | `enforce` | `false` | Enables secure-only onboarding. When enabled, legacy discovery methods and insecure transports are disabled, and onboarding follows a fail-closed model. |
-| `trust_model` | `voucher-anchored` | Defines the trust establishment mechanism. Supported values are `voucher-anchored` and `trusted-server`. |
-| `require_ownership_voucher` | `true` | Requires a valid ownership voucher during onboarding. Cannot be disabled when Trusted ZTP is enabled. |
+| `trust_model` | `trusted-server` | Defines the trust establishment mechanism. Supported values are `voucher-anchored` and `trusted-server`. |
 | `dhcp_option_source` | `option_143` | Specifies the DHCP option used for bootstrap server discovery. `option_67` is not allowed when Trusted ZTP is enabled. |
 | `tls_supported_version` | `TLSv1.3` | Defines the minimum TLS version permitted for secure communications. TLS 1.2 and earlier versions are rejected. |
 | `identity_source` | `file` | Specifies the source of device identity credentials. Supported values are `file` (Phase 1) and `tpm` (Phase 2). |
 | `allow_file_based_idevid` | `true` | Determines whether file-based IDevID credentials are allowed. Set to `false` to require TPM-backed device identity. |
 | `enrollment_retry_count` | `3` | Maximum number of retries for onboarding operations that return a retryable (`SUSPEND`) status. |
 | `enrollment_retry_delay_sec` | `30` | Delay, in seconds, between enrollment retry attempts. |
-| `trusted_time` | `voucher-anchored` | Defines the clock-handling policy when the device boots without a valid system time. Supported values include `strict`, `voucher-anchored`, and `ntp-first`. |
-| `tpm_idevid_handle` | `0x81010001` | TPM persistent handle used to store the Initial Device Identity (IDevID). Available in Phase 2 deployments. |
-| `tpm_ldevid_handle` | `0x81010002` | TPM persistent handle used for the active Local Device Identity (LDevID). Available in Phase 2 deployments. |
-| `tpm_ldevid_staging_handle` | `0x81010003` | Temporary TPM handle used during crash-safe LDevID renewal operations. Available in Phase 2 deployments. |
-| `ldevid_renewal_before_expiry_days` | `90` | Number of days before certificate expiry when LDevID renewal should be initiated. |
 | `allow_onboarding_scripts` | `false` | Controls execution of RFC 8572 onboarding scripts. When disabled, onboarding is limited to configuration-only operations. |
-| `mgmt_vrf` | `default` | Specifies the VRF used for Trusted ZTP communication sessions. Common values include `default` and `mgmt`. |
 | `discovery_interfaces` | `auto` | Defines the interfaces used for bootstrap server discovery. If not specified, interfaces are selected automatically. |
 
 ##### Configuration Source of Truth and Precedence
@@ -1058,7 +1054,7 @@ Trusted ZTP configuration can originate from two sources:
 | Source | Purpose |
 |----------|----------|
 | `bootstrap.json` (Factory Trust Plane) | Loaded during first boot before `CONFIG_DB` exists. Defines the device's initial trust posture and security controls. |
-| `CONFIG_DB (TZTP \ global)` | Runtime configuration used after onboarding. Managed through CLI, gNMI, or management frameworks. |
+| `CONFIG_DB` | Runtime configuration used after onboarding. |
 
 
 #### 11.3 YANG model Enhancements 
@@ -1146,16 +1142,6 @@ module sonic-tztp {
                  (RFC 8572 section 5.4) verifies the server via the ownership voucher.";
           }
 
-          leaf require_ownership_voucher {
-              type boolean;
-              default true;
-              must "not(. = 'false' and ../trusted_mode = 'true')" {
-                  error-message
-                    "require_ownership_voucher cannot be disabled while trusted_mode is true";
-              }
-              description "Require a valid RFC 8366 ownership voucher.";
-          }
-
           /* ----- discovery and transport ----- */
 
           leaf dhcp_option_source {
@@ -1171,13 +1157,6 @@ module sonic-tztp {
               }
               description "Where the bootstrap-server / redirect URI is read from.";
           }
-          /*For Future Use (if deployments require this support)*/
-          leaf-list static_servers {
-              type https-uri;
-              description
-                "Static bootstrap-server URLs, used when DHCP discovery is not
-                 available. Tried in order; RFC 8572 redirects are honoured.";
-          }
 
           leaf tls_supported_version {
               type enumeration {
@@ -1185,18 +1164,6 @@ module sonic-tztp {
               }
               default "TLSv1.3";
               description "Minimum TLS version; lower versions are rejected.";
-          }
-
-          leaf allow_unsigned_fallback {
-              type boolean;
-              default false;
-              must "not(. = 'true' and ../trusted_mode = 'true')" {
-                  error-message
-                    "allow_unsigned_fallback is prohibited while trusted_mode is true";
-              }
-              description
-                "Test/lab only. Permit applying an unsigned payload. Forbidden in
-                 trusted_mode.";
           }
 
           /* ----- device identity ----- */
@@ -1235,18 +1202,6 @@ module sonic-tztp {
               type uint32 { range "5..300"; }
               default 30;
               description "Delay between retries, in seconds.";
-          }
-
-          /* ----- trusted time ----- */
-
-          leaf trusted_time {
-              type enumeration {
-                  enum "strict";            // require a valid clock
-                  enum "voucher-anchored";  // anchor to voucher created-on
-                  enum "ntp-first";         // attempt NTP before validating
-              }
-              default "voucher-anchored";
-              description "Clock policy for a clock-less first boot.";
           }
 
           /* ----- trust material ----- */
@@ -1321,24 +1276,6 @@ module sonic-tztp {
 }
 ```
 
-**Important Security Note**
-
-> **YANG provides configuration validation, not a runtime security boundary.**
-
-The YANG model enforces these constraints only through the **management interfaces**, such as:
-- CLI
-- gNMI
-- Other management-framework APIs
-
-This provides:
-- Early validation of configuration changes
-- Protection against accidental misconfiguration
-- A clear and consistent operational contract for administrators
-
-The effective runtime security posture is enforced by the **Trusted ZTP runtime components**. Runtime configuration stored in `CONFIG_DB` is **not permitted to weaken** these settings. 
-
----
-
 #### 11.4. Operational State DB Enhancements (STATE_DB)  
 
 Operational visibility is provided by a new STATE_DB table, `TZTP|status`, which does not exist for legacy ZTP:
@@ -1353,7 +1290,6 @@ Operational visibility is provided by a new STATE_DB table, `TZTP|status`, which
 | `owner_subject` | Subject of the validated owner certificate |
 | `sztp_client` / `sztp_client_version` | The reused client and its version |
 | `client_provision_result` | `OK`, or the typed error (`MTLS_FAIL`, `VOUCHER_FAIL`, `CMS_FAIL`, `VERSION_MISMATCH`) |
-| `clock_policy` | Trusted-time policy applied on this boot|
 | `ldevid_issued` | (Phase 2) whether an LDevID was enrolled |
 | `ldevid_expiry` | (Phase 2) LDevID expiry, ISO-8601 |
 | `last_error` | Populated on failure |
@@ -1376,7 +1312,6 @@ The main events would be:
 | `CONFIG_APPLY_OK` / `FAIL` | Configuration apply / rollback result |
 | `TRUST_FALLBACK_LEGACY` | Transition-mode fallback to legacy taken  |
 | `TRUST_DOWNGRADE_BLOCKED` | Enforced mode blocked a legacy fallback |
-| `CLIENT_VERSION_MISMATCH` | Installed client is outside the pinned version range |
 
 ---
 
@@ -1493,11 +1428,7 @@ Unit tests run with the client mocked, so they require no live TPM, network, or 
 
 ---
 
-### 15. Open/Action items 
-
----
-
-### 16. Appendix A: The Core Concept of Trusted ZTP : Device Identity = Serial Number Embedded in a Certificate
+### 15. Appendix A: The Core Concept of Trusted ZTP : Device Identity = Serial Number Embedded in a Certificate
 
 >
 > **A device's identity is its serial number, stored inside a unique device certificate.**
@@ -1589,7 +1520,7 @@ Trusted ZTP identifies a switch by reading the serial number embedded inside its
 
 ---
 
-### 17. Appendix B : PKI Trust Hierarchy
+### 16. Appendix B : PKI Trust Hierarchy
 
 Trusted ZTP relies on a Public Key Infrastructure (PKI) consisting of two Certificate Authorities (CAs): a **Vendor CA** owned by the hardware manufacturer and an **Operator CA** owned by the network operator. Understanding which CA signs which artifacts makes the trust model straightforward.
 
@@ -1648,7 +1579,7 @@ Trusted ZTP uses two device identities.
 
 ---
 
-### 18. Appendix C : How Phase1 works without a TPM
+### 17. Appendix C : How Phase1 works without a TPM
 
 Most current whitebox platforms do not provide a factory-installed TPM-backed IDevID. To enable secure onboarding on existing hardware, Phase 1 introduces a file-based identity model that provides equivalent functionality.
 
@@ -1760,7 +1691,7 @@ secure onboarding continues
 ```
 ---
 
-### 19. Appendix D : Device Configuration using Voucher Anchor Mode
+### 18. Appendix D : Device Configuration using Voucher Anchor Mode
 
 #### Overview
 In RFC 8572 (Secure Zero Touch Provisioning / SZTP), the Voucher-anchor trust mode is one of the method a brand-new network device uses to trust an on-premise Bootstrap Server. This mode is designed for "blind deployment" scenarios, where the network device has never met its owner's server before. Instead of relying on pre-installed server certificates, the device relies on a Voucher signed by the manufacturer to establish a dynamic chain of trust.
@@ -1850,7 +1781,7 @@ If all cryptographic checks pass, the session transitions into the **Trusted Pha
 
 ---
 
-### 20. Appendix E : Device Configuration using Trusted Server Mode
+### 19. Appendix E : Device Configuration using Trusted Server Mode
 
 #### Overview
 The below sequence illustrates how a network device securely onboards through **RFC 8572 Secure Zero Touch Provisioning (SZTP)** by establishing mutual trust with a Trusted Bootstrap Server, retrieving onboarding information, executing provisioning tasks, and reporting progress throughout the process in Trusted Server (Direct) mode.
