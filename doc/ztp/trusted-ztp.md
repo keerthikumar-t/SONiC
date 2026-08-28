@@ -30,10 +30,11 @@
 13. [Restrictions/Limitations](#14-restrictions-/-limitations)
 14. [Testing Requirements](#15-testing-requirements)
 15. [Open/Action items](#16-open-/-action-items)
-16. [Appendix A](#16-the-core-concept-of-trusted-ztp-Device-Identity-=-Serial-Number-Embedded-in-a-Certificate)
-16. [Appendix B](#17-appendix-a-pki-trust-hierarchy)
-17. [Appendix C](#18-appendix-b-how-phase1-works-without-a-TPM)
-
+16. [Appendix A](#16-appendix-a-the-core-concept-of-trusted-ztp-Device-Identity-=-Serial-Number-Embedded-in-a-Certificate)
+17. [Appendix B](#17-appendix-b-pki-trust-hierarchy)
+18. [Appendix C](#18-appendix-c-how-phase1-works-without-a-TPM)
+19. [Appendix D](#19-appendix-d-device-configuration-using-voucher-anchor-mode)
+    
 ### 1. Revision History  
 
 | Version | Date | Author | Description |
@@ -1906,3 +1907,76 @@ secure onboarding continues
 ```
 ---
 
+### 19. Appendix D : Device Configuration using Voucher Anchor Mode
+
+#### Overview
+In RFC 8572 (Secure Zero Touch Provisioning / SZTP), the Voucher-anchor trust mode is one of the method a brand-new network device uses to trust an on-premise Bootstrap Server. This mode is designed for "blind deployment" scenarios, where the network device has never met its owner's server before. Instead of relying on pre-installed server certificates, the device relies on a Voucher signed by the manufacturer to establish a dynamic chain of trust.
+
+#### How it works
+When a device boots up in a factory-default state, it has no idea who its owner is. It cannot verify the local Bootstrap Server's standard SSL/TLS certificate because it does not possess the owner’s root CA. To solve this, trust is proxied through the device Manufacturer. Switch uses a mix of hardware identities and manufacturer-signed digital tickets called Vouchers to prove ownership, by following below steps.
+
+##### Step 1: The Hardware Identity (SUDI / IDevID)
+When a switch leaves the factory, the manufacturer burns a unique identity directly into the TPM 2.0 silicon. 
+- This identity includes a Private Key (locked inside the TPM chip) and a matching Public Key Certificate.
+- This is called the Secure Unique Device Identifier (SUDI) or Initial Device Identifier (IDevID).
+- It includes the switch’s exact Serial Number and is signed by the manufacturer's global root certificate authority (CA).
+
+##### Step 2: The Owner Claims the Switch (Offline Setup)
+When user purchase the switch, the manufacturer registers its serial number to user's account on their portal. 
+- User shall provide the manufacturer with their company's public certificate, called the Pinned-Domain Certificate (PDC). 
+- The manufacturer creates a digital file called an Ownership Voucher (OV). 
+- Inside this voucher, the manufacturer states: "We built switch serial #12345, and it now officially belongs to Company XYZ's public key." 
+- The manufacturer cryptographically signs this voucher using their own private key and gives it to user. User shall place it on their Bootstrap server.
+
+##### Step 3: The Cryptographic Handshake (During Boot)
+When the switch boots up empty in user's data centre, it performs a 4-step validation sequence to establish total trust:
+
+```text
+[ Network Device ]                                   [ SZTP Bootstrap Server ]
+
+         |                                                       |
+         | =============== UNTRUSTED PHASE ===================== |
+         |                                                       |
+         | ---- 1. TLS Client Hello (Sends IDevID) ------------> |
+         | <--- 2. TLS Server Hello (Sends Unverified Cert) ---- |
+         |                                                       |
+         | ---- 3. HTTP POST: /get-bootstrapping-data ---------> |
+         | <--- 4. HTTP 200 OK: Sends SZTP Artifacts ----------- |
+         |         (Voucher + Owner Cert + Config Payload)       |
+         |                                                       |
+         | =============== LOCAL VALIDATION ==================== |
+         |                                                       |
+         |  [ Device verifies Voucher via MASA Trust Anchor ]   |
+         |  [ Extracts 'pinned-domain-cert' from Voucher ]       |
+         |  [ Validates Server's TLS Cert via Owner Cert ]       |
+         |                                                       |
+         | =============== TRUSTED PHASE ======================= |
+         |                                                       |
+         | ---- 5. Process & Commit Secure Payload ------------> |
+         | ---- 6. HTTP POST: Report Progress (Success!) ------> |
+```
+
+**Step 1 & 2: The Initial Untrusted TLS Session**
+- The switch boots, receives Option 143 via DHCP, and opens a connection to user's central Bootstrap server. 
+- The device sends a TLS Client Hello presenting its hardware-baked IDevID certificate (signed by the TPM).
+- The Bootstrap server verifies that the certificate is legitimate and then responds with its TLS certificate. At this moment, the device cannot verify this server certificate. However, the protocol allows the device to provisionally proceed with the TLS session anyway to fetch the necessary trust artifacts.
+
+**Step 3 & 4: Fetching the Bootstrapping Artifacts**
+- Operating over this provisionally encrypted, yet unverified TLS connection, the device sends a RESTCONF POST request to the /get-bootstrapping-data endpoint.
+- The Bootstrap Server responds with an ietf-sztp-bootstrap-server container containing three tightly linked components:
+  	- The Ownership Voucher: Signed by the manufacturer. 
+  	- The Owner Certificate: The server's identity certificate.
+  	- The Onboarding Information: The encrypted configuration files and scripts.
+
+**Step 5: Chain of Trust Validation (Inside the Switch)**
+The switch receives this payload and must validate it without relying on external internet connections:
+- Validation A (Trusting the Voucher): The switch’s local OS contains an immutable public key for its own manufacturer. It checks the signature on the Ownership Voucher. Because it matches the manufacturer, the switch instantly trusts the voucher.
+- Validation B (Learning the Owner): The switch reads the trusted voucher. It finds the Pinned-Domain Certificate inside it. The switch now thinks: "Ah! The manufacturer says I belong to Company XYZ. This is their public key."
+- Validation C (Trusting the Configuration): The switch uses this newly acquired Company XYZ public key to verify the signature on your Config JSON/Scripts.
+
+If all cryptographic checks pass, the session transitions into the **Trusted Phase**.
+
+**Step 6: Execution and Progress Reporting**
+- Now that the server is authenticated, the device trusts the Onboarding Information payload.
+- The device processes the configuration, executes scripts, and installs required OS images.
+- Finally, it uses the secure channel to send a formal progress report back to the server, confirming the setup succeeded.
