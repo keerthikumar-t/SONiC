@@ -34,6 +34,7 @@
 17. [Appendix B](#17-appendix-b-pki-trust-hierarchy)
 18. [Appendix C](#18-appendix-c-how-phase1-works-without-a-TPM)
 19. [Appendix D](#19-appendix-d-device-configuration-using-voucher-anchor-mode)
+20. [Appendix E](#20-appendix-e-device-configuration-using-trusted-server-mode)
     
 ### 1. Revision History  
 
@@ -1931,30 +1932,44 @@ When user purchase the switch, the manufacturer registers its serial number to u
 ##### Step 3: The Cryptographic Handshake (During Boot)
 When the switch boots up empty in user's data centre, it performs a 4-step validation sequence to establish total trust:
 
-```text
-[ Network Device ]                                   [ SZTP Bootstrap Server ]
 
-         |                                                       |
-         | =============== UNTRUSTED PHASE ===================== |
-         |                                                       |
-         | ---- 1. TLS Client Hello (Sends IDevID) ------------> |
-         | <--- 2. TLS Server Hello (Sends Unverified Cert) ---- |
-         |                                                       |
-         | ---- 3. HTTP POST: /get-bootstrapping-data ---------> |
-         | <--- 4. HTTP 200 OK: Sends SZTP Artifacts ----------- |
-         |         (Voucher + Owner Cert + Config Payload)       |
-         |                                                       |
-         | =============== LOCAL VALIDATION ==================== |
-         |                                                       |
-         |  [ Device verifies Voucher via MASA Trust Anchor ]   |
-         |  [ Extracts 'pinned-domain-cert' from Voucher ]       |
-         |  [ Validates Server's TLS Cert via Owner Cert ]       |
-         |                                                       |
-         | =============== TRUSTED PHASE ======================= |
-         |                                                       |
-         | ---- 5. Process & Commit Secure Payload ------------> |
-         | ---- 6. HTTP POST: Report Progress (Success!) ------> |
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Device as Network Device
+    participant Server as SZTP Bootstrap Server
+
+    Note over Device,Server: UNTRUSTED PHASE
+
+    Device->>Server: TLS Client Hello<br/>Presents IDevID Certificate
+
+    Server-->>Device: TLS Server Hello<br/>Presents Unverified TLS Certificate
+
+    Device->>Server: POST /get-bootstrapping-data
+
+    Server-->>Device: HTTP 200 OK<br/>Ownership Voucher<br/>Owner Certificate<br/>Signed Onboarding Payload
+
+    Note over Device: LOCAL VALIDATION
+
+    Note over Device: Verify Ownership Voucher using Manufacturer Trust Anchor
+    Note over Device: Extract pinned-domain-cert / Owner Trust Anchor
+    Note over Device: Validate Owner Certificate
+    Note over Device: Verify Payload Signature and Nonce
+
+    Note over Device,Server: TRUSTED PHASE
+
+    Note over Device: Process Validated Onboarding Data
+    Note over Device: Apply Boot Image, Scripts, and Configuration
+
+    Device->>Device: Commit Secure Configuration
+
+    Note over Device: Telemetry Allowed Only After Trust Is Established
+
+    Device->>Server: Report Progress (Success)
+    Server-->>Device: HTTP 200 OK
 ```
+*Figure 16 : Untrusted-to-Trusted SZTP Bootstrap Workflow*
 
 **Step 1 & 2: The Initial Untrusted TLS Session**
 - The switch boots, receives Option 143 via DHCP, and opens a connection to user's central Bootstrap server. 
@@ -1980,3 +1995,196 @@ If all cryptographic checks pass, the session transitions into the **Trusted Pha
 - Now that the server is authenticated, the device trusts the Onboarding Information payload.
 - The device processes the configuration, executes scripts, and installs required OS images.
 - Finally, it uses the secure channel to send a formal progress report back to the server, confirming the setup succeeded.
+
+---
+
+### 20. Appendix E : Device Configuration using Trusted Server Mode
+
+#### Overview
+The below sequence illustrates how a network device securely onboards through **RFC 8572 Secure Zero Touch Provisioning (SZTP)** by establishing mutual trust with a Trusted Bootstrap Server, retrieving onboarding information, executing provisioning tasks, and reporting progress throughout the process in Trusted Server (Direct) mode.
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Switch as Switch / Device
+    participant Server as Trusted Bootstrap Server
+
+    Note over Switch,Server: 1. TLS Session Establishment & Mutual Authentication (mTLS)
+
+    Switch->>Server: TLS Client Hello (Initiates TLS connection)
+    Server-->>Switch: TLS Server Certificate (Validated via configured Trust Anchor)
+    Server->>Switch: Certificate Request
+    Switch-->>Server: TLS Client Certificate (Presents IDevID Certificate)
+
+    Note over Server: Server verifies IDevID against Manufacturer CA
+    Note over Switch,Server: Mutual TLS Tunnel Established
+
+    Note over Switch,Server: 2. Fetch Bootstrapping Data
+
+    Switch->>Server: POST /restconf/operations/ietf-sztp-bootstrap-server:get-bootstrapping-data
+    Note right of Switch: Input: signed-data-preferred=false,<br/>hw-model, os-name, os-version
+
+    Server-->>Switch: 200 OK
+    Note left of Server: Output: unsigned onboarding-information (JSON/XML),<br/>reporting-level
+
+    Note over Switch,Server: 3. Execution & Telemetry Progress Reporting
+
+    rect rgb(245,245,245)
+
+        Switch->>Server: POST /report-progress<br/>(bootstrap-initiated)
+        Server-->>Switch: 200 OK
+
+        Note over Switch: Step 1: Update Boot Image (if required)
+
+        Switch->>Server: POST /report-progress<br/>(boot-image-initiated)
+        Server-->>Switch: 200 OK
+
+        Switch->>Server: POST /report-progress<br/>(boot-image-complete)
+        Server-->>Switch: 200 OK
+
+        Note over Switch: Step 2: Run Pre-configuration Script
+
+        Switch->>Server: POST /report-progress<br/>(pre-script-initiated)
+        Server-->>Switch: 200 OK
+
+        Switch->>Server: POST /report-progress<br/>(pre-script-complete)
+        Server-->>Switch: 200 OK
+
+        Note over Switch: Step 3: Commit Configuration
+
+        Switch->>Server: POST /report-progress<br/>(config-initiated)
+        Server-->>Switch: 200 OK
+
+        Switch->>Server: POST /report-progress<br/>(config-complete)
+        Server-->>Switch: 200 OK
+
+        Note over Switch: Step 4: Run Post-configuration Script
+
+        Switch->>Server: POST /report-progress<br/>(post-script-complete)
+        Server-->>Switch: 200 OK
+
+        Note over Switch: Step 5: Complete Bootstrapping
+
+        Switch->>Server: POST /report-progress<br/>(bootstrap-complete, ssh-host-keys, trust-anchor-certs)
+        Server-->>Switch: 200 OK
+
+    end
+```
+*Figure 17 : Trusted Bootstrap Server Onboarding Workflow (mTLS-Based)*
+	
+#### 1. TLS Session Establishment and Mutual Authentication (mTLS)
+Before any provisioning data is exchanged, both the device and the bootstrap server authenticate each other using certificates.
+
+##### Sequence
+1. Device initiates a TLS connection (`Client Hello`).
+2. Bootstrap Server presents its TLS server certificate.
+3. Device validates the server certificate using a trusted CA anchor.
+4. Server requests a client certificate.
+5. Device presents its **IDevID (Initial Device Identity)** certificate.
+6. Bootstrap Server validates the IDevID against the manufacturer CA.
+7. A secure **Mutual TLS (mTLS)** tunnel is established.
+
+##### Security Objective
+- Authenticate the bootstrap server.
+- Authenticate the device using hardware-bound identity.
+- Protect all subsequent provisioning traffic with encryption and integrity.
+
+#### 2. Fetch Bootstrapping Data
+Once the secure channel is established, the device requests onboarding information.
+
+##### Device Request
+The device sends a:
+```text
+get-bootstrapping-data
+```
+Including:
+- Hardware model
+- Operating system name
+- Operating system version
+- Provisioning preferences
+
+##### Server Response
+The Bootstrap Server returns:
+- Onboarding information
+- Provisioning instructions
+- Reporting parameters
+
+##### Security Objective
+- Deliver authenticated provisioning data.
+- Ensure bootstrap information is exchanged only over the trusted mTLS channel.
+
+#### 3. Provisioning Execution and Telemetry Reporting
+The device executes the onboarding workflow while continuously reporting progress to the Bootstrap Server.
+
+##### Bootstrap Initiation
+```text
+report-progress
+bootstrap-initiated
+```
+##### Step 1: Update Boot Image (Optional)
+The device updates its software image if required.
+
+##### Progress Events
+```text
+boot-image-initiated
+boot-image-complete
+```
+
+##### Purpose
+- Install or upgrade the required NOS image.
+- Ensure the device runs the expected software version.
+
+##### Step 2: Run Pre-Configuration Script
+The device executes any prerequisite setup actions.
+
+#### Progress Events
+```text
+pre-script-initiated
+pre-script-complete
+```
+
+##### Purpose
+- Perform preparatory tasks.
+- Configure dependencies before applying the main configuration.
+
+##### Step 3: Commit Configuration
+The device applies the intended operational configuration.
+
+##### Progress Events
+```text
+config-initiated
+config-complete
+```
+
+##### Purpose
+- Configure interfaces, protocols, credentials, and services.
+- Bring the device into the desired operational state.
+
+##### Step 4: Run Post-Configuration Script
+Additional deployment actions are executed after configuration is applied.
+
+##### Progress Events
+```text
+post-script-complete
+```
+
+##### Purpose
+- Perform validation checks.
+- Execute post-deployment customization tasks.
+
+##### Step 5: Complete Bootstrapping
+The device reports successful completion of provisioning.
+
+##### Final Progress Report
+```text
+bootstrap-complete
+ssh-host-keys
+trust-anchor-certs
+```
+
+##### Purpose
+- Confirm successful onboarding.
+- Provide operational trust information to the Bootstrap Server.
+
+---
