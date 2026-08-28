@@ -359,8 +359,8 @@ flowchart TB
         APPL[APPL_DB]
 
         ASICDB[ASIC_DB]
-        STATEDB["STATE_DB<br/>+ TZTP status / audit"]
-        CONFIGDB["CONFIG_DB<br/>+ TZTP tables"]
+        STATEDB["STATE_DB&lt;br/&gt;+ TZTP status / audit"]
+        CONFIGDB["CONFIG_DB&lt;br/&gt;+ TZTP tables"]
         COUNTERS[COUNTERS_DB]
     end
 
@@ -371,27 +371,26 @@ flowchart TB
 
     %% Management Plane
     subgraph MGMT["Management Plane"]
-        TZTP["sonic-ztp<br/>native host service<br/><br/>+ Trusted ZTP front-end"]
+        TZTP["sonic-ztp&lt;br/&gt;native host service&lt;br/&gt;&lt;br/&gt;+ Trusted ZTP front-end"]
 
-        CLI["CLI<br/>show/config tztp"]
+        CLI["CLI&lt;br/&gt;show/config tztp"]
 
         API["gNMI / REST / telemetry"]
     end
 
     %% External Infrastructure
     subgraph EXT["External Infrastructure"]
-        DHCP["DHCP<br/>(Option 143 / Option 67)"]
-        BOOT["RFC 8572<br/>Bootstrap Server"]
+        DHCP["DHCP&lt;br/&gt;(Option 143 / Option 67)"]
+        BOOT["RFC 8572&lt;br/&gt;Bootstrap Server"]
     end
     style EXT fill:#e8f5e9,stroke:#4caf50,stroke-width:3px,color:#000
-
 
     %% Hardware Platform
     subgraph HW["Hardware Platform"]
         SYNCD[syncd]
         SAI[SAI]
         ASIC[ASIC]
-        TPM["TPM 2.0<br/>(Phase 2)"]
+        TPM["TPM 2.0&lt;br/&gt;(Phase 2)"]
     end
 
     %% Relationships
@@ -420,9 +419,15 @@ flowchart TB
     API --> STATEDB
 
     TZTP -. Phase 2 .-> TPM
-```
 
-*Figure 3 : Trusted ZTP SONiC Architecture*
+    %% Trusted ZTP Components (Blue)
+    style TZTP fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
+    style CLI fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
+    style CONFIGDB fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
+    style STATEDB fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
+    style TPM fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
+```
+*Figure 3 : Trusted ZTP SONiC Architecture (green - external components, blue - modified SONiC NOS components, grey - no changes)*
 
 ---
 
