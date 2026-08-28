@@ -250,7 +250,7 @@ The sequence follows,
                           │ Helpers: swtpm (software TPM)                │
                           └──────────────────────────────────────────────┘
 ```
-*Figure 2 : The Big Picture — The Players of Secure Zero Touch Provisioning Architecture*
+*Figure 3 : The Big Picture — The Players of Secure Zero Touch Provisioning Architecture*
 
 #### Naming — tZTP vs sZTP
 
@@ -424,7 +424,7 @@ flowchart TB
     style STATEDB fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
     style TPM fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
 ```
-*Figure 3 : Trusted ZTP SONiC Architecture (green - external components, blue - modified SONiC NOS components, grey - no changes)*
+*Figure 4 : Trusted ZTP SONiC Architecture (green - external components, blue - modified SONiC NOS components, grey - no changes)*
 
 ---
 
@@ -474,7 +474,7 @@ flowchart TB
     classDef reuse fill:#d6eaf8,stroke:#2471a3,color:#154360
     classDef io fill:#eaecee,stroke:#7f8c8d,color:#2c3e50
 ```
-*Figure 4 : Trusted ZTP internal components Overview*
+*Figure 5 : Trusted ZTP internal components Overview*
 *The reused client (blue) is isolated behind `SztpClientAdapter`; the new modules (green) establish trust and hand a validated payload to the reused engine, which applies it. External inputs and databases are grey.*
 
 - The device reads its trust posture from **bootstrap.json** and obtains SZTP discovery information through **DHCP options 143/136**.
@@ -577,7 +577,7 @@ flowchart TD
     J --> M
     K --> N
 ```
-*Figure 5 : SztpClientAdapter Exit Code Handling*
+*Figure 6 : SztpClientAdapter Exit Code Handling*
 
 **4. TimeAnchor**
 
@@ -745,7 +745,7 @@ flowchart TD
     K --> L
     K --> M
 ```
-*Figure 6 : RFC 8572 SZTP-Agent Security Processing Architecture*
+*Figure 7 : RFC 8572 SZTP-Agent Security Processing Architecture*
 
 **Responsibilities,**
 Within the Trusted ZTP architecture, sztp-agent serves as the security-processing engine responsible for trust establishment and onboarding validation. It performs the cryptographic and protocol-specific operations required by RFC 8572, including:
@@ -795,7 +795,7 @@ sequenceDiagram
     end
 ```
 
-*Figure 7 : Trusted ZTP Provisioning Sequence with 'sztp-agent'*
+*Figure 8 : Trusted ZTP Provisioning Sequence with 'sztp-agent'*
 
 
 **9. ztp-engine.py and Existing Plugins (Reused)**
@@ -853,7 +853,7 @@ flowchart TD
     classDef fail fill:#f5b7b1,stroke:#a93226,color:#641e16
 ```
 
-*Figure 8 : Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy*
+*Figure 9 : Start-up mode selection. Green = secure path, amber = legacy path, red = fail-closed, grey = decision points. The default (`trusted_mode=false`) and the transition-mode fallback both route to the unchanged legacy engine; an active trust-validation failure never falls back to legacy*
 
 
 ### 8.3 Impacted SONiC Repositories
@@ -905,7 +905,7 @@ sequenceDiagram
     ENG->>DB: status = SUCCESS + audit events
     AGT->>BS: progress report (bootstrap-complete)
 ```
-*Figure 12 : Successful voucher-anchored provisioning*
+*Figure 10 : Successful voucher-anchored provisioning*
 
 **Step by step:**
 
@@ -945,7 +945,7 @@ sequenceDiagram
     ADP->>DB: status = FAILED-VALIDATION + reason
     Note over DISC,DB: No image, configuration, or script is applied.
 ```
-*Figure 13 : Fail-closed behaviour on any trust failure*
+*Figure 11 : Fail-closed behaviour on any trust failure*
 
 **Step by step:**
 
@@ -981,7 +981,7 @@ sequenceDiagram
     ENG->>DB: TZTP status = DISABLED, ZTP proceeds
     Note over TB,DB: identical to today's SONiC — no voucher, no mutual TLS
 ```
-*Figure 14 : Legacy provisioning when the secure option is disabled*
+*Figure 12 : Legacy provisioning when the secure option is disabled*
 
 **Step by step:**
 
@@ -1610,7 +1610,7 @@ flowchart LR
     classDef new fill:#d5f5e3,stroke:#1e8449,color:#0b3d1f
     classDef use fill:#d6eaf8,stroke:#2471a3,color:#154360
 ```
-*Figure 15 : Phase-1 realization: a per-unit device certificate and CA files stand in for the TPM.*
+*Figure 13 : Phase-1 realization: a per-unit device certificate and CA files stand in for the TPM.*
 
 #### Step 1: Factory or Staging Provisioning
 
@@ -1752,7 +1752,7 @@ sequenceDiagram
     Device->>Server: Report Progress (Success)
     Server-->>Device: HTTP 200 OK
 ```
-*Figure 16 : Untrusted-to-Trusted SZTP Bootstrap Workflow*
+*Figure 14 : Untrusted-to-Trusted SZTP Bootstrap Workflow*
 
 **Step 1 & 2: The Initial Untrusted TLS Session**
 - The switch boots, receives Option 143 via DHCP, and opens a connection to user's central Bootstrap server. 
@@ -1854,7 +1854,7 @@ sequenceDiagram
 
     end
 ```
-*Figure 17 : Trusted Bootstrap Server Onboarding Workflow (mTLS-Based)*
+*Figure 15 : Trusted Bootstrap Server Onboarding Workflow (mTLS-Based)*
 	
 #### 1. TLS Session Establishment and Mutual Authentication (mTLS)
 Before any provisioning data is exchanged, both the device and the bootstrap server authenticate each other using certificates.
