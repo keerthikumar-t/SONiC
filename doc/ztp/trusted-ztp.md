@@ -115,18 +115,17 @@ Design interfaces are defined in this HLD. Detailed design will be covered in a 
 
 ### 5. Overview 
 
-### 5.1 The Existing SONiC ZTP Service
+### 5.1 Current SONiC-ZTP Overview
 
-SONiC's existing Zero Touch Provisioning (ZTP) automates first-boot configuration of bare-metal switches i.e. it lets a factory-fresh SONiC switch configure itself with no operator interaction. You rack it, cable it, power it on. It uses DHCP to discover where its configuration lives, downloads a provisioning definition (the ZTP JSON), executes an ordered series of plugins — install firmware, load config_db.json, load a minigraph, set SNMP, run custom scripts — and finally hands control to the real, provisioned configuration.
+SONiC's existing Zero Touch Provisioning (ZTP) automates the initial configuration of bare-metal switches. A factory-fresh SONiC switch can be deployed with minimal operator involvement: once the device is racked, connected, and powered on, it uses DHCP to locate its provisioning information, downloads a ZTP configuration file, and executes a series of provisioning steps. These steps may include installing firmware, loading a config_db.json file or minigraph, configuring SNMP, and running custom scripts. After provisioning is complete, control is handed over to the final device configuration.
 
-The central design idea: ZTP is temporary scaffolding. It installs a throwaway “ZTP profile” configuration (just enough to bring links up and run DHCP), does its work, then removes itself and reloads the configuration it produced. 
+A key design principle of SONiC ZTP is that it serves as a temporary bootstrap mechanism. The system first applies a minimal "ZTP profile" configuration, sufficient to bring up network connectivity and obtain DHCP information. After provisioning tasks are completed, this temporary configuration is removed and replaced with the intended operational configuration.
 
-It is widely adopted across data centre deployments. However, as SONiC expands into enterprise, regulated, and edge environments, the current implementation's lack of cryptographic security prevents adoption in security-sensitive contexts.
+SONiC ZTP is widely used in data center deployments because it simplifies large-scale device onboarding and reduces manual configuration effort. However, as SONiC adoption expands into enterprise, edge, and regulated environments, stronger security guarantees have become necessary. 
 
+### 5.2 Motivation: Security Gaps in Today's SONiC-ZTP
 
-### 5.2 Motivation: Security Gaps in Today's ZTP (`sonic-ztp`) 
-
-#### Current ZTP Architecture
+The current ZTP implementation relies on unauthenticated discovery and configuration delivery mechanisms, and it does not provide cryptographic verification of the provisioning source or payloads. As a result, it is not suitable for security-sensitive deployments that require authenticated device onboarding, verified ownership, and tamper-resistant configuration delivery. The existing ZTP flow is functional but **insecure by default**.
 
 ```mermaid
 sequenceDiagram
@@ -153,48 +152,58 @@ sequenceDiagram
 
     S->>C: config reload
 ```
-*Figure 1 — SONiC ZTP Initial Provisioning Sequence*
+*Figure 1 — Current ZTP - Initial Provisioning Sequence*
 
-The existing ZTP flow is functional but **insecure by default** i.e. **Zero touch** is **easy**, but **Zero trust** is the **hard part**. Its discovery relies on DHCP options transmitted in cleartext (DHCPv4 option 67 for the configuration URL, option 66 for a TFTP server, option 239 for a provisioning script; DHCPv6 option 59). It supports unauthenticated transports — HTTP, TFTP, and FTP — alongside HTTPS and SCP, and uses curl to download provisioning data.
+Current SONiC ZTP supports few security features, but it does not provide a standards-based mechanism for establishing trust between a factory-fresh device and the provisioning server. Because a factory-fresh device has no built-in mechanism to verify the identity of the provisioning server or confirm that the received payload is intended for it, onboarding remains vulnerable to man-in-the-middle and rogue-server attacks. 
 
-Existing plain ZTP has the following trust problems: 
+**Security-Gaps/Trust-Challenges in existing ZTP**
 
-**Threat 1 · rogue server**
-The DEVICE trusts whatever server the network points it to i.e. the device trusts anyone who answers via DHCP. Point it at a malicious server and it installs the attacker's image as its "operating system." The box is now owned before it ever joins the network.
+- **Threat 1: Rogue Server :** The device trusts the provisioning server provided through DHCP. A malicious server can supply unauthorized software or configuration, potentially compromising the device before it becomes operational.
 
-**Threat 2 · rogue device**
-The server hands an OS + config to anyone who asks. A stolen or counterfeit device asks for onboarding data and walks away with your golden config and firmware.
+- **Threat 2: Rogue Device :** The provisioning server may provide onboarding information to any device that requests it. Unauthorized, stolen, or counterfeit devices could obtain sensitive firmware, configurations, or other provisioning data.
 
-SONiC ZTP does not rely entirely on standard security mechanisms. Instead, it uses a custom security model with the following protections:
+- **Threat 3: No payload integrity :** Files and provisioning artifacts are applied as received, without a standards-based mechanism to verify that the onboarding payload originates from an authorized source and has not been tampered with.
 
-- Configuration files hosted on the provisioning server can be optionally encrypted using **AES encryption**.
-- Files can be digitally signed using **RSA/SHA-512 signatures** to ensure their integrity and authenticity.
-- SONiC can optionally verify the HTTPS server certificate before downloading files.
+- **Threat 4: Insecure Discovery :** The current ZTP discovery process relies on DHCP options (such as Option 67) to provide the location of provisioning files. The device downloads and applies the referenced configuration or script files without a standards-based mechanism to authenticate the source or verify ownership. As a result, a malicious DHCP or provisioning server could redirect the device to unauthorized onboarding content.
 
-> **Important:** HTTPS certificate verification can be disabled by setting the following option: `secure: false` within ZTP JSON file i.e. used at ZTP sections such as firmware, config, plugin, or file downloads.
+and many more. An attacker with access to the provisioning network could potentially deliver unauthorized software or configuration during the device's initial boot process. 
 
-> When 'secure:false' is set, the downloader performs HTTPS downloads without validating the server's TLS certificate (curl -k). Encryption still exists, but the switch does not verify that it is communicating with the legitimate provisioning server.
+Current protections include **AES encryption**, **RSA/SHA-512 digital signatures**, and **optional HTTPS certificate verification**. While these features provide basic protection, they do not offer standards-based device authentication, server ownership validation, or secure onboarding trust required for modern deployments.
 
-There is no in-band mechanism for a factory-fresh device to establish who it is talking to or whether the payload legitimately belongs to it. Consequently, an attacker positioned on the provisioning network can serve a malicious image or configuration to a switch during its most vulnerable moment — first boot.
+### 5.3 Solution: How tZTP Addresses Existing ZTP Security Gaps and Trust Challenges
 
-The table below states each gap and how Trusted ZTP closes it. The final column indicates the phase in which the gap is fully addressed.
+- **Threat 1: Rogue Server** : **How tZTP Addresses It:**
+ tZTP uses mutual TLS (mTLS), server certificate validation, and RFC 8572 ownership validation to verify the identity of the bootstrap server before accepting any onboarding information. The device only trusts servers that can prove they belong to the authorized operator.
 
-| # | Security gap | Today | Trusted ZTP resolution | Phase |
-|:--|:-------------|:------|:-----------------------|:-----:|
-| G1 | Device impersonation — any host can request configuration | No device authentication | The config is bound to the device by the voucher's serial; a per-unit file cert (Phase 1) or TPM IDevID (Phase 2) carries that serial | 1 (file) → 2 (IDevID) |
-| G2 | Rogue bootstrap server — any server is trusted | No server authentication | Server is trusted only via a pinned owner/CA anchor or a validated ownership voucher | 1 |
-| G3 | Cleartext transmission | HTTP / TFTP / FTP permitted | TLS 1.3 only (mutual auth with the IDevID in Phase 2) | 1 |
-| G4 | No payload integrity | Files applied as received | RFC 8572 signed onboarding information (CMS) plus voucher | 1 |
-| G5 | No identity after provisioning | Shared credentials or manual certificates | LDevID issued for gNMI/RESTCONF | 2 |
-| G6 | Insecure discovery | DHCP option 67 / 239 | DHCP option 143 / 136 (RFC 8572), mandatory in enforced mode | 1 |
+ - **Threat 2: Rogue Device** : **How tZTP Addresses It:**
+ tZTP introduces device identity verification using device certificates (IDevId). During initial authentication, the server validates the device's identity before providing onboarding information, ensuring that only authorized devices can receive provisioning data.
 
-> **On G1 in Phase 1:** device identity rests on the voucher's serial binding, carried by a per-unit *file* certificate — software-strength. Hardware-bound identity that fully closes G1 arrives with the TPM IDevID in Phase 2.
+- **Threat 3: No Payload Integrity Verification** : **How tZTP Addresses It:**
+ tZTP leverages RFC 8572 conveyed information, including CMS-signed onboarding payloads and ownership vouchers, to verify that onboarding information originates from an authorized source and has not been modified before any configuration or software is applied.
 
+- **Threat 4: Insecure Discovery** : **How tZTP Addresses It:**
+tZTP treats DHCP as an untrusted discovery mechanism. DHCP provides only a bootstrap-server reference, while actual trust is established through RFC 8572 authentication, mTLS, certificate validation, and ownership verification before onboarding content is accepted.
 
-### 5.3 What Trusted ZTP Adds
+**In summary,**
+Trusted ZTP transforms the onboarding process from:
 
-tZTP (Trusted ZTP) is a security extension to the existing ZTP mechanism. It implements RFC 8572 (SZTP) in SONiC userspace — adding **secure discovery and trust-establishment stage in front of** that existing service — while remaining fully backward compatible with existing ZTP deployments. Conceptually, today's ZTP performs *"DHCP hands me a URL, I download a configuration."* Trusted ZTP performs *"DHCP hands me a bootstrap server, the device and server prove their identities to each other, and I download a cryptographically signed configuration that I verify against an ownership voucher before applying anything."*
+_"DHCP tells me where to download files, and I trust them."_
 
+to:
+
+_"DHCP provides a pointer, but I verify the server, verify the device, validate the ownership chain, and verify the signed onboarding payload before applying anything."_
+
+This establishes a cryptographically verifiable trust relationship between the device, the operator, and the provisioning infrastructure.
+
+#### Naming — tZTP vs sZTP
+
+The feature is named **tZTP (Trusted ZTP)** rather than **sZTP (secure ZTP)** to emphasize that here primary contribution is not merely securing the communication channel, but establishing an end-to-end trust framework for device onboarding. Trusted ZTP introduces device identity verification, operator ownership validation, and cryptographically verifiable onboarding information, creating a chain of trust from the device manufacturer through the network operator to the provisioned device.
+
+In this context, "secure" describes the protection of the communication channel, while "trusted" describes confidence in the entire onboarding process, including the identities of participating entities, the ownership relationship, and the authenticity and integrity of the provisioning data.
+
+_**One-line Note: tZTP emphasizes end-to-end trust in device onboarding, while "secure" refers only to protecting the communication channel.**_
+
+---
 
 ```text
                           ┌──────────────────────────────────────────────┐
@@ -221,8 +230,6 @@ tZTP (Trusted ZTP) is a security extension to the existing ZTP mechanism. It imp
 ```
 *Figure 2 : The Big Picture — The Players of Secure Zero Touch Provisioning sequence*
 
-
-Crucially, **once the payload is validated, nothing about how SONiC applies configuration changes**. The validated payload is translated into SONiC's normal provisioning data and handed to the existing engine and plugins. The new work is confined to *establishing trust and obtaining a verified payload* — not to reimplementing provisioning.
 
 #### The Trusted ZTP flow in four moves
 
@@ -271,9 +278,6 @@ The server sends **"conveyed information"** — a signed package that's either:
 
 The switch downloads the image, **checks its hash**, **writes the config**, **runs pre/post scripts**, and **tells the server** each stage's outcome.
 
-#### Naming — tZTP vs sZTP
-
-The feature is named **tZTP (Trusted ZTP)** rather than sZTP to emphasise that the trust model is the primary contribution: device identity, chain-of-trust from vendor through operator to device, and cryptographically provable configuration provenance. "Secure" is a property of the channel; "Trusted" is a property of the entire provisioning relationship.
 
 
 ### 6. Requirements
