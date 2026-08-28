@@ -623,7 +623,7 @@ Responsible for loading the read-only `bootstrap.json` file during startup. It d
     "trusted_mode": true,
     "enforce": true,
     "discovery": ["dhcp-opt143", "dhcp-opt136", "static"],
-    "static_servers": ["https://bootstrap.example.net"],
+    "static_servers": ["https://bootstrap.example.net"], 
     "trust_model": "voucher-anchored",
     "require_ownership_voucher": true,
     "tls_supported_version": "TLSv1.3",
@@ -1318,7 +1318,7 @@ module sonic-tztp {
               }
               description "Where the bootstrap-server / redirect URI is read from.";
           }
-
+          /*For Future Use (if deployments require this support)*/
           leaf-list static_servers {
               type https-uri;
               description
@@ -1328,7 +1328,6 @@ module sonic-tztp {
 
           leaf tls_supported_version {
               type enumeration {
-                  enum "TLSv1.2";
                   enum "TLSv1.3";
               }
               default "TLSv1.3";
