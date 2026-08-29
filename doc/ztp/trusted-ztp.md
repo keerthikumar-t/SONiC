@@ -1870,6 +1870,10 @@ sequenceDiagram
   	- The Ownership Voucher: Signed by the manufacturer. 
   	- The Owner Certificate: The server's identity certificate.
   	- The Onboarding Information: The encrypted configuration files and scripts.
+  	- How They Work Together During Bootstrapping:
+  	  	1. The Ownership Voucher tells the switch: "_The manufacturer confirms that Public Key X belongs to user's rightful owner._"
+  	  	2. The Owner Certificate tells the switch: "_Here is the full X.509 certificate for Public Key X so user can verify the signature over the onboarding payload._"
+  	  	3. The Onboarding Data Signature proves to the switch: "_The entity holding the private key corresponding to Public Key X created this configuration payload._"
 
 **Step 5: Chain of Trust Validation (Inside the Switch)**
 The switch receives this payload and must validate it without relying on external internet connections:
