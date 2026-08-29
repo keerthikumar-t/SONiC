@@ -581,20 +581,125 @@ flowchart TD
 
 **4. TimeAnchor**
 
-Factory-fresh switches may boot without a valid real-time clock and default to an incorrect timestamp. Since certificate and voucher validation depend on accurate time, Trusted ZTP provides a mechanism to establish trusted time during onboarding. It derives an initial trusted time reference from voucher information and prevents clock rollback attacks.
+The timeanchor module in Trusted ZTP (tZTP) provides a trusted baseline system clock for a factory-fresh or unprovisioned switch whose real-time clock (RTC) is unset, zeroed, or out of sync.
 
-**Responsibilities,**
-- Detect Invalid Time
- 	1. Determine whether the current system time is valid.
-    2. Trigger trusted-time establishment when the clock is unavailable or incorrect.
-- Establish Trusted Time
-    1. Use the validated ownership voucher's `created-on` timestamp as an initial trusted time reference.
-    2. Enable certificate and trust validation during first boot.
- - Prevent Clock Rollback
-    1. Enforce a monotonic trusted-time baseline.
-    2. Prevent the system clock from moving backward beyond the last persisted known-good time.
-- Revalidate After Time Synchronization
-    1. Revalidate trust decisions after accurate time is obtained through NTP or another trusted time source.
+Because X.509 certificate validation and Cryptographic Message Syntax (CMS) verification depend on valid time windows (`notBefore` and `notAfter`), a zeroed clock would cause cryptographic validation to fail. The timeanchor module solves this problem by establishing a safe lower time bound using authenticated metadata without requiring access to an unauthenticated NTP server first.
+
+**How It Works Across Operational Modes,**
+
+**In Voucher-Anchored Mode:**
+ 
+   Mechanism: Uses the MASA-signed Ownership Voucher (RFC 8366).
+ 
+   Workflow:
+   - The initial device connection to the bootstrap server is established using factory manufacturer trust anchors with relaxed initial time checks.
+   - The pledge receives the ownership voucher signed by the Manufacturer Authorized Signing Authority (MASA).
+   - The timeanchor module parses the tamper-proof `created-on` timestamp (e.g., 2026-08-29T08:30:00Z) from the verified voucher payload.
+   - It ratchets the system clock forward to this timestamp, providing a trusted reference time to strictly validate subsequent operator certificates, CMS signatures, and onboarding scripts.
+
+  **Example of voucher with `created-on' field:**
+```text
+{
+  "ietf-voucher:voucher": {
+    "created-on": "2026-08-29T08:30:00Z",
+    "assertion": "verified",
+    "serial-number": "JADA123456789",
+    "pinned-domain-cert": "MIIB... (Base64 DER Encoded Certificate) ...",
+    "domain-cert-revocation-checks": false
+  }
+}
+```
+
+  Detailed flow is explained as below,
+```text
+[ Unset / Zeroed RTC Clock (1970-01-01) ]
+          │
+          ▼
+1. Initial TLS Handshake Attempt
+   ├── Connect to Bootstrap Server via mTLS
+   ├── Server presents TLS certificate signed by Operator / Owner CA
+   └── Time checks (notBefore / notAfter) are temporarily relaxed 
+       (because RTC is unset and pledge lacks Operator Root CA)
+          │
+          ▼
+2. Transport Channel Established (Provisional / Unauthenticated)
+          │
+          ▼
+3. Server Delivers Signed Onboarding Artifact
+   └── Contains MASA-Signed Ownership Voucher + CMS-Signed Onboarding Payload
+          │
+          ▼
+4. Manufacturer CA Verification of Voucher
+   └── Pledge verifies MASA digital signature over voucher using factory Manufacturer Trust Anchor
+          │
+          ▼
+5. timeanchor Module Processes 'created-on'
+   ├── Extracts tamper-proof 'created-on' timestamp (ISO 8601/RFC 3339) from validated voucher
+   └── Updates local system clock to 'created-on' (Establishes Trusted Lower Bound)
+          │
+          ▼
+6. Domain Certificate Pinning & Payload Authentication
+   ├── Extracts 'pinned-domain-cert' (Operator CA) from verified voucher
+   └── Validates CMS signature on onboarding payload using the pinned Operator CA
+          │
+          ▼
+7. Strict PKI & Execution Mode Enforced
+   ├── Re-enables strict certificate lifetime checks for subsequent TLS/download operations
+   └── Hands off authenticated configuration / scripts to sonic-ztp engine
+```
+
+**In Trusted-Server Mode:**
+
+   Mechanism: Uses local trust anchors and authenticated server payload metadata.
+   
+   Workflow:
+   - Ownership vouchers are optional and typically omitted because the switch already holds the operator's pinned root/CA trust anchors.
+   - If the local RTC is unset, timeanchor reads/extracts the authenticated `signingTime` from the operator's CMS-signed onboarding payload.
+   - Once the CMS signature over the onboarding payload is verified against the pinned local trust anchor, timeanchor updates the system clock using this authenticated timestamp to validate short-lived artifacts and maintain system audit logs.
+
+   **Example of CMS-signed payload with `signingTime' field:**     
+```text
+CMS_ContentInfo:
+   contentType: pkcs7-signedData (1.2.840.113549.1.7.2)
+   d.signedData:
+	  signerInfos:
+         signerInfo:
+            signedAttrs:
+			  object: **signingTime** (1.2.840.113549.1.9.5)
+				set:
+				  UTCTIME: Oct 28 14:30:00 2026 GMT
+```
+
+  Detailed flow is explained as below,
+```text
+[ Unset RTC Clock (1970) ]
+          │
+          ▼
+1. TLS Handshake Attempt
+   ├── Validate Server Cert against pinned root/CA trust anchors (Signature OK)
+   └── Bypass notBefore/notAfter checks due to uninitialized local clock
+          │
+          ▼
+2. Secure TLS Channel Established (Transport Established)
+          │
+          ▼
+3. Server Delivers CMS-Signed Onboarding Payload
+          │
+          ▼
+4. timeanchor Module Processes Payload
+   ├── Verifies CMS signature using local trust anchor
+   └── Extracts authenticated 'signingTime' attribute from CMS payload
+          │
+          ▼
+5. Clock Ratcheted Forward
+   └── Local RTC updated to 'signingTime' (Time Anchor Established)
+          │
+          ▼
+6. Strict PKI & Execution Mode
+   ├── Full time-range checks re-enabled
+   └── Provisioning script / Config applied via sonic-ztp engine
+```
+
 
 **5. PayloadMapper**
 
