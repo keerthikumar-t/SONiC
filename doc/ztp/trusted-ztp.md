@@ -247,7 +247,7 @@ The sequence follows,
           boot image,     │                   │ Apache TLS   │           │
           config,scripts  │                   │    :443      │           │
                           │                   └──────────────┘           │
-                          │ Helpers: swtpm (software TPM)                │
+                          │                                              │
                           └──────────────────────────────────────────────┘
 ```
 *Figure 3 : The Big Picture — The Players of Secure Zero Touch Provisioning Architecture*
@@ -1699,10 +1699,10 @@ In RFC 8572 (Secure Zero Touch Provisioning / SZTP), the Voucher-anchor trust mo
 #### How it works
 When a device boots up in a factory-default state, it has no idea who its owner is. It cannot verify the local Bootstrap Server's standard SSL/TLS certificate because it does not possess the owner’s root CA. To solve this, trust is proxied through the device Manufacturer. Switch uses a mix of hardware identities and manufacturer-signed digital tickets called Vouchers to prove ownership, by following below steps.
 
-##### Step 1: The Hardware Identity (SUDI / IDevID)
+##### Step 1: The Hardware Identity (IDevID)
 When a switch leaves the factory, the manufacturer burns a unique identity directly into the TPM 2.0 silicon. 
 - This identity includes a Private Key (locked inside the TPM chip) and a matching Public Key Certificate.
-- This is called the Secure Unique Device Identifier (SUDI) or Initial Device Identifier (IDevID).
+- This is called the Initial Device Identifier (IDevID).
 - It includes the switch’s exact Serial Number and is signed by the manufacturer's global root certificate authority (CA).
 
 ##### Step 2: The Owner Claims the Switch (Offline Setup)
