@@ -1,0 +1,628 @@
+# SONiC ZTP (Zero Touch Provisioning) — End-to-End Architecture
+
+> Source-grounded design document derived strictly from `src/sonic-ztp` in this repo
+> plus its integration points in `files/`, `rules/`, `slave.mk`, and `sonic-yang-models`.
+> Diagrams are written in **Mermaid** — paste the ```mermaid blocks into GitHub, VS Code,
+> mermaid.live, or Confluence to render them.
+
+---
+
+## 0. What ZTP is, in one paragraph (from the code)
+
+ZTP is a **boot-time daemon** (`ztp.service` → `/usr/lib/ztp/ztp-engine.py`) that runs *only when a switch boots with no saved configuration*. It temporarily loads a minimal "ZTP profile" config that brings up management (`eth0`) and front-panel (`Ethernet*`) ports as DHCP clients, uses DHCP options to **discover a URL** pointing to provisioning instructions (a "ZTP JSON" file, or a script, or a minigraph), downloads them, and executes an ordered list of **plugins** ("configuration sections") that actually configure the device (load `config_db.json`, load a minigraph, install firmware, set SNMP, etc.). When done it removes the temporary profile so the real configuration takes over. It is packaged from the `src/sonic-ztp` git submodule and gated at image-build time by the `ENABLE_ZTP=y` make flag.
+
+---
+
+## 1. Where everything lives (package layout)
+
+```
+src/sonic-ztp/                         ← git submodule, built into sonic-ztp_1.0.0_all.deb
+├── debian/
+│   ├── control        Depends: python3, curl, ifupdown2, isc-dhcp-client, python3-natsort
+│   ├── install        maps files → image paths
+│   ├── sonic-ztp.dirs creates /var/lib/ztp/{tmp,sections}, /var/run/ztp
+│   └── ztp.service    systemd unit (After config-setup, interfaces-config, rsyslog-config)
+└── src/
+    ├── usr/bin/ztp                      ← operator CLI (enable/disable/run/erase/status/features)
+    ├── etc/default/ztp                  ← env knobs (DEBUG, TEST_MODE, CONFIG_JSON, COVERAGE)
+    ├── etc/dhcp/dhclient-{enter,exit}-hooks.d/  ← symlinks into DHCP client
+    └── usr/lib/ztp/
+        ├── sonic-ztp                    ← service ExecStart wrapper (launches engine, forwards signals)
+        ├── ztp-engine.py                ← THE core daemon (1003 lines)
+        ├── ztp-profile.sh              ← installs/removes the temporary ZTP ConfigDB profile
+        ├── templates/
+        │   ├── ztp-config.j2            ← renders the ZTP profile config_db.json
+        │   └── ifupdown2_dhcp_policy.j2 ← DHCPv6 DUID/wait policy for ports
+        ├── dhcp/                        ← the real hook scripts (symlinked from /etc/dhcp/...)
+        │   ├── ztp                       exit hook: captures opt 66/67/59/239/225/226 URLs
+        │   ├── ztp-rsyslog               exit hook: DHCP-driven remote syslog
+        │   ├── inband-ztp-ip / -ip6      enter hooks: program DHCP IP onto Ethernet* ports
+        ├── plugins/                     ← the "action" executables
+        │   ├── configdb-json  graphservice  firmware
+        │   ├── connectivity-check  download  snmp  test-plugin
+        └── python3/dist-packages/ztp/   ← shared library
+            ├── defaults.py     ZTPCfg.py    ZTPLib.py     JsonReader.py
+            ├── ZTPSections.py  ZTPObjects.py Downloader.py Logger.py  DecodeSysEeprom.py
+```
+
+Build wiring (from `rules/` and `slave.mk`):
+
+```
+ENABLE_ZTP=y  (rules/config)
+   └─ Makefile.work → slave.mk:1671 adds SONIC_ZTP deb to image
+        └─ sonic_debian_extension.j2 {% if enable_ztp == "y" %} install_deb sonic-ztp_*.deb
+             └─ debian/rules → dh_systemd_enable --name=ztp  (unit enabled at boot)
+```
+
+---
+
+## 2. High-level component architecture
+
+```mermaid
+flowchart TB
+  subgraph BOOT["Boot / config bring-up"]
+    CS["config-setup.service<br/>(files/image_config/config-setup)"]
+    IFC["interfaces-config.service"]
+    RSC["rsyslog-config.service"]
+  end
+
+  subgraph SVC["ztp.service"]
+    WRAP["/usr/lib/ztp/sonic-ztp<br/>(ExecStart wrapper)"]
+    ENG["ztp-engine.py<br/>ZTPEngine.executeLoop()"]
+  end
+
+  subgraph PROFILE["Temporary ZTP profile"]
+    PS["ztp-profile.sh install/remove"]
+    T1["ztp-config.j2 → ZTP config_db.json"]
+    T2["ifupdown2_dhcp_policy.j2"]
+  end
+
+  subgraph NET["Network discovery (DHCP)"]
+    DHC["isc-dhcp-client (eth0 + Ethernet*)"]
+    HK1["enter-hook inband-ztp-ip / -ip6"]
+    HK2["exit-hook ztp (opt 66/67/59/239/225/226)"]
+    HK3["exit-hook ztp-rsyslog"]
+  end
+
+  subgraph LIB["ztp python library"]
+    SEC["ZTPSections.ZTPJson"]
+    OBJ["ZTPObjects URL / DynamicURL / Identifier"]
+    DL["Downloader (curl)"]
+    CFG["ZTPCfg + defaults.py + ZTPLib.getCfg"]
+  end
+
+  subgraph PLUG["Plugins (per configuration section)"]
+    P1["configdb-json"]:::p
+    P2["graphservice"]:::p
+    P3["firmware"]:::p
+    P4["connectivity-check / download / snmp / test-plugin"]:::p
+  end
+
+  DB[("Redis<br/>CONFIG_DB / APPL_DB")]
+  FS[("/host/ztp/*<br/>ztp_data.json, shadow, ztp_cfg.json")]
+
+  CS --> SVC
+  IFC --> SVC
+  RSC --> SVC
+  WRAP --> ENG
+  ENG -->|install/remove| PS --> T1 & T2 --> DB
+  DB --> DHC --> HK1 & HK2 & HK3
+  HK1 --> DB
+  HK2 --> FS
+  ENG -->|reads URL files| FS
+  ENG --> SEC --> OBJ --> DL
+  ENG --> CFG
+  ENG -->|runs 1 per section| PLUG
+  P1 & P2 --> DB
+  P3 -->|sonic-installer| DB
+  SEC --> FS
+  ENG -->|link-scan operstate| DB
+  classDef p fill:#eef,stroke:#557;
+```
+
+**Interfacing components outside the ZTP package it depends on:** `swsscommon` (`ConfigDBConnector`, `SonicV2Connector`), `sonic-cfggen`, `config`/`config-setup` CLIs, `sonic-installer`, `decode-syseeprom`, `curl`, `isc-dhcp-client`, `ifupdown2`, `rsyslog`, `systemd`, and the `ZTP` table in CONFIG_DB (schema: `src/sonic-yang-models/yang-models/sonic-ztp.yang`).
+
+---
+
+## 3. The core engine (`ztp-engine.py` → class `ZTPEngine`)
+
+The daemon is a single loop, `executeLoop()`. Its whole life is a **discovery loop** followed by **JSON processing** followed by **profile cleanup**.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Init
+  Init --> AdminCheck: updateActivity("Initializing")
+  AdminCheck --> RemoveProfile: admin-mode == False
+  RemoveProfile --> [*]
+  AdminCheck --> DISCOVERY: admin-mode == True
+
+  state DISCOVERY {
+    [*] --> discover
+    discover --> found: __discover() True
+    discover --> notfound: False
+    notfound --> loadProfile: __loadZTPProfile("discovery")
+    loadProfile --> linkscan: __link_scan()
+    linkscan --> restartIfc: link up detected → systemctl restart interfaces-config
+    linkscan --> timercheck: no link up
+    timercheck --> restartIfc2: elapsed > restart-ztp-interval (300s)
+    timercheck --> sleep: else sleep(discovery-interval 10s)
+    restartIfc --> discover
+    restartIfc2 --> discover
+    sleep --> discover
+  }
+
+  found --> MANUAL_CONFIG: minigraph.xml / config_db.json / warm boot
+  found --> processJSON: ztp_mode != DISCOVERY
+  MANUAL_CONFIG --> RemoveProfile2
+  processJSON --> retry: rv=retry → back to DISCOVERY
+  processJSON --> restart: rv=restart → __forceRestartDiscovery
+  processJSON --> RemoveProfile2: rv=stop
+  retry --> DISCOVERY
+  restart --> DISCOVERY
+  RemoveProfile2 --> RebootMaybe: reboot_on_completion?
+  RebootMaybe --> [*]
+```
+
+Key engine methods (all in `ztp-engine.py`):
+
+| Method | Responsibility |
+|---|---|
+| `executeLoop()` | Top-level loop; admin-mode gate; discovery; profile removal; final reboot. |
+| `__discover()` | Precedence-ordered detection of provisioning source (§6). Sets `ztp_mode`. |
+| `__loadZTPProfile(event)` | Calls `ztp-profile.sh install <discovery\|resume>` once (`__ztp_profile_loaded` guard). |
+| `__removeZTPProfile()` | Calls `ztp-profile.sh remove [config-fallback]`; strips `ZTP` key from `config_db.json`. |
+| `__processZTPJson()` | Loads `ZTPJson`, marks start, runs sections, evaluates result, decides restart/stop. |
+| `__processConfigSections()` | Iterates sorted sections; resolves + runs plugin; maps exit code → SUCCESS/SUSPEND/FAILED; handles `halt-on-failure`. |
+| `__evalZTPResult()` | Overall SUCCESS/FAILED from section results + `ignore-result`; delayed reboot. |
+| `__rebootAction()` | Honors `reboot-on-success` / `reboot-on-failure`. |
+| `__link_scan()` / `__detect_intf_state()` | Watches `/sys/class/net/*/operstate` and APPL_DB `PORT_TABLE` for a port coming up, to retrigger DHCP. |
+| `__downloadURL()` | Reads a URL-file (written by DHCP hook), downloads via `Downloader`, records the discovering interface. |
+| `__createProvScriptJson()` / `__createGraphserviceJson()` | Synthesize a ZTP JSON wrapper for the Option-239 script and Option-225/226 minigraph cases. |
+| `__forceRestartDiscovery()` | Clears DHCP leases, sleeps `restart-ztp-interval`, forces profile reload + link rescan. |
+
+`signal_handler` (SIGTERM/SIGINT) waits up to `sighandler-wait-interval` (60s) for child plugin PIDs (`runcmd_pids`) then SIGKILLs them — this is how `systemctl stop ztp` cleanly aborts a running plugin.
+
+---
+
+## 4. The data model
+
+### 4.1 The three JSON files (in `/host/ztp/`)
+
+- **`ztp_cfg.json`** (`getCfg('...')` config) — daemon tunables; every key + default is in `defaults.py`. Only `admin-mode` is persisted by default; everything else falls back to `defaultCfg`.
+- **`ztp_data.json`** (`ztp-json`) — the *working* ZTP JSON: full provisioning instructions + live per-section status. This is the source of truth for a session.
+- **`ztp_data_shadow.json`** (`ztp-json-shadow`) — a **sanitized** copy (mode `0644`) containing only `['ignore-result','reboot-on-success','reboot-on-failure','halt-on-failure','description','timestamp','status','start-timestamp','error']` per section. URLs, plugin bodies, and credentials are stripped. The `ztp status` CLI reads *only* the shadow file.
+
+### 4.2 ZTP JSON structure (parsed by `ZTPSections.ZTPJson`)
+
+```jsonc
+{
+  "ztp": {
+    // optional: whole file can itself be fetched via a url/dynamic-url
+    "url": { "source": "http://server/ztp.json" },
+
+    // global flags (defaults come from ztp_cfg.json)
+    "ignore-result": false,
+    "restart-ztp-on-failure": false,
+    "restart-ztp-no-config": true,
+    "config-fallback": false,
+    "reboot-on-success": false,
+    "reboot-on-failure": false,
+
+    // one or more "configuration sections":
+    "01-firmware":     { "plugin": "firmware",    "install": {} },
+    "02-configdb-json":{ "plugin": {"url": {}}, "clear-config": true },
+    "09-provisioning": {
+        "plugin": { "url": {"source":"http://s/p.sh"}, "shell": true },
+        "suspend-exit-code": 2,
+        "halt-on-failure": true
+    }
+  }
+}
+```
+
+**How sections turn into work** (`ZTPJson.__init__`):
+1. If the top-level `ztp` has a `url`/`dynamic-url`, download the real JSON first and reload.
+2. `__buildDefaults()` injects missing flags from config; validates `status`.
+3. On first run (`status == BOOT`) `__cleanup()` wipes `/var/lib/ztp/{tmp,sections}`.
+4. Each dict-valued key = a **configuration section**. `__writeConfigSections()` splits it into `/var/lib/ztp/sections/<name>/input.json` (`section-input-file`).
+5. `plugin(name)` resolves the executable; `pluginArgs(name)` builds the argv.
+
+**Plugin resolution order** (`ZTPJson.plugin()`):
+```
+plugin is dict?
+ ├─ reuse /var/lib/ztp/sections/<sec>/plugin if already downloaded
+ ├─ has "dynamic-url" → DynamicURL(...).download()   (identifier-templated URL)
+ ├─ has "url"         → URL(...).download()
+ └─ has "name"        → name
+plugin is string → name = that string
+no name → strip leading "NN-" from section name (regex ^[0-9]+-)
+final → /usr/lib/ztp/plugins/<name>  (must exist, else None → section FAILED)
+```
+`pluginArgs()`: unless `ignore-section-data:true`, the first arg is the section's `input.json` path; an optional `args` string is appended. So the canonical invocation is:
+```
+/usr/lib/ztp/plugins/configdb-json  /var/lib/ztp/sections/02-configdb-json/input.json
+```
+
+### 4.3 Status state machines
+
+**Configuration-section status** (enforced in `ConfigSection.__buildDefaults`; driven by `__processConfigSections`):
+
+```mermaid
+stateDiagram-v2
+  [*] --> BOOT: section created
+  BOOT --> IN_PROGRESS: engine picks it up
+  SUSPEND --> IN_PROGRESS: retried next pass/boot
+  IN_PROGRESS --> SUCCESS: plugin rc == 0
+  IN_PROGRESS --> SUSPEND: rc == suspend-exit-code
+  IN_PROGRESS --> FAILED: any other rc / exception / plugin unresolved
+  BOOT --> DISABLED: invalid status value in JSON
+  DISABLED --> [*]: skipped (ignored in result)
+  SUCCESS --> [*]
+  FAILED --> [*]
+  note right of FAILED
+    halt-on-failure:true → abort whole run
+    reboot-on-failure:true → reboot
+  end note
+```
+Valid states: `BOOT, IN-PROGRESS, SUSPEND, DISABLED, FAILED, SUCCESS`.
+
+**Overall ZTP status** (`__evalZTPResult`, shown by `ztp status -c`):
+```
+0:DISABLED  admin-mode == False
+3:NOT-STARTED (BOOT)  →  4:IN-PROGRESS  →  5:SUCCESS | 6:FAILED
+(2:ACTIVE-DISCOVERY if service up but no shadow JSON yet; 1:INACTIVE otherwise)
+```
+Result rule: ZTP = SUCCESS unless some section is `FAILED` with `ignore-result:false`; global `ignore-result:true` forces SUCCESS. `DISABLED` sections are ignored.
+
+### 4.4 Config keys (selected — full list is `defaults.py`, 55+ keys)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `admin-mode` | `True` | Master on/off (the only persisted key). |
+| `feat-inband` / `feat-ipv4` / `feat-ipv6` | `True` | Enable in-band ports / IPv4 / IPv6 discovery. |
+| `discovery-interval` | `10` | Sleep between discovery passes. |
+| `restart-ztp-interval` | `300` | Restart networking if no data found in this window. |
+| `restart-ztp-on-failure` | `False` | Re-run ZTP if it ends FAILED. |
+| `restart-ztp-no-config` | `True` | Re-run ZTP if it ends with no `config_db.json`. |
+| `restart-ztp-on-invalid-data` | `True` | Re-discover if downloaded JSON is invalid. |
+| `monitor-startup-config` | `True` | Presence of `config_db.json` means "provisioned". |
+| `config-fallback` | `False` | On removal, load startup/factory config. |
+| `curl-retries`/`curl-timeout` | `3`/`30` | Download behavior. |
+| `opt67-url`, `opt59-v6-url`, `opt239-url`, `opt239-v6-url`, `opt66-tftp-server`, `graph-url`, `acl-url` | `/var/run/ztp/...` | Files the DHCP hook writes discovered URLs into. |
+| `ztp-json`, `ztp-json-shadow`, `ztp-json-local` | `/host/ztp/...` | Working / shadow / operator-supplied JSON. |
+| `plugins-dir` | `/usr/lib/ztp/plugins` | Built-in plugin lookup. |
+
+---
+
+## 5. Boot integration — how ZTP actually starts
+
+`config-setup` (`files/image_config/config-setup/config-setup`) decides at first boot whether ZTP runs at all:
+
+```mermaid
+flowchart TD
+  A["config-setup: do_config_initialization()"] --> B{minigraph.xml present?}
+  B -- yes --> C["reload_minigraph → NOT ZTP"]
+  B -- no --> D{ztp_is_enabled?<br/>ztp status -c != 0:DISABLED}
+  D -- no --> E["factory default preset config"]
+  D -- yes --> F["ztp-profile.sh create → /tmp/ztp_config_db.json<br/>reload_configdb (loads ZTP profile)"]
+  F --> G["ztp.service starts (After config-setup)"]
+  A --> W{warm boot?}
+  W -- yes --> X["skip config init & ZTP entirely"]
+```
+
+Then `ztp.service` (`After=config-setup.service interfaces-config.service rsyslog-config.service`) launches `/usr/lib/ztp/sonic-ztp` → `ztp-engine.py`.
+
+The **ZTP profile** that `ztp-profile.sh` loads (rendered from `ztp-config.j2`) is a `config_db.json` containing:
+- `DEVICE_METADATA.localhost.type = "not-provisioned"`, hostname `sonic`
+- full `PORT` table, `admin_status: up` for front-panel ports **iff** `ZTP_INBAND=="true"` (else `down`)
+- `ZTP|mode` = `{profile:"active", inband, out-of-band:"true", ipv4, ipv6, product-name, serial-no}`
+
+`ZTP|mode.profile == "active"` is the single flag every other component keys off (`ztp-profile.sh get_ztp_profile`, engine `__is_ztp_profile_active`, `configdb-json __stop_dhcp`, `interfaces.j2`, `graphserviceurl`).
+
+The rendered ConfigDB profile drives `interfaces.j2` / `dhclient.conf.j2` (in `files/`) to emit DHCP stanzas: `eth0` unconditionally (v4/v6 per flags), and each in-band `Ethernet*` port whose live `oper_status == up`. `dhclient.conf.j2` also requests the special options and sends `user-class "SONiC-ZTP"` and `dhcp-client-identifier "SONiC##<product>##<serial>"`.
+
+---
+
+## 6. Discovery precedence (`__discover()`)
+
+The engine checks these in strict order and stops at the first hit:
+
+```
+1. /host/ztp/ztp_data.json exists         → resume existing session (ztp-session)
+2. warm boot (/proc/cmdline)              → MANUAL_CONFIG (skip)
+3. /etc/sonic/minigraph.xml exists        → MANUAL_CONFIG (skip)
+4. /etc/sonic/config_db.json exists       → MANUAL_CONFIG (skip)   [monitor-startup-config]
+5. /host/ztp/ztp_data_local.json          → local-fs
+6. DHCP Option 67 URL   (+ Option 66 tftp server prefix)  → dhcp-opt67
+7. DHCPv6 Option 59 URL                   → dhcp6-opt59
+8. DHCP Option 239 provisioning-script URL→ dhcp-opt239   (wraps script into ZTP JSON)
+9. DHCPv6 Option 239 URL                  → dhcp6-opt239
+10. DHCP Option 225 minigraph URL (+226 ACL) → dhcp-opt225-graph-url (wraps into graphservice JSON)
+```
+
+The DHCP hook `/usr/lib/ztp/dhcp/ztp` is what populates the files in steps 6–10, writing `$new_bootfile_name`→opt67 file, `$new_tftp_server_name`→opt66 file, `$new_dhcp6_boot_file_url`→opt59 file, `$new_provisioning_script_url`→opt239 file, `$new_minigraph_url`→graph file, `$new_acl_url`→acl file — guarded by a per-interface/per-proto lock (`/var/run/ztp/ztp.lock`) and only when `ztp status -c != 0:DISABLED`.
+
+---
+
+## 7. Sequence diagrams — every supported use-case
+
+### 7.1 Fresh boot, no data yet → in-band link-scan discovery loop
+
+```mermaid
+sequenceDiagram
+  participant SD as systemd
+  participant ENG as ztp-engine
+  participant PS as ztp-profile.sh
+  participant DB as CONFIG_DB
+  participant DHC as dhclient
+  participant HK as dhcp hooks
+  SD->>ENG: start (After config-setup/interfaces/rsyslog)
+  ENG->>ENG: admin-mode == True
+  loop DISCOVERY
+    ENG->>ENG: __discover() → no source yet
+    ENG->>PS: install discovery
+    PS->>DB: config reload /tmp/ztp_config_db.json (ZTP profile, ports admin up)
+    PS->>PS: wait_for_system_online (ports appear)
+    DHC->>HK: enter-hook inband-ztp-ip(6) → config interface ip add EthernetX
+    DHC->>HK: exit-hook ztp → write /var/run/ztp/dhcp_67-ztp_data_url
+    ENG->>ENG: __link_scan(): operstate up on EthernetX?
+    alt link up detected
+      ENG->>SD: systemctl restart interfaces-config (re-run DHCP)
+    else nothing for 300s
+      ENG->>ENG: cleanup leases, restart interfaces-config
+    else
+      ENG->>ENG: sleep(discovery-interval 10s)
+    end
+  end
+```
+
+### 7.2 DHCP Option 67 (ZTP JSON URL), optional Option 66 (TFTP server)
+
+```mermaid
+sequenceDiagram
+  participant DHC as dhclient(eth0)
+  participant HK as exit-hook ztp
+  participant ENG as ztp-engine
+  participant DL as Downloader(curl)
+  participant SEC as ZTPJson
+  participant PL as plugin(s)
+  DHC->>HK: BOUND (new_bootfile_name, [new_tftp_server_name])
+  HK->>HK: write dhcp_67-ztp_data_url (+ dhcp_66-ztp_tftp_server)
+  ENG->>ENG: __discover(): opt67-url file present
+  ENG->>DL: __downloadURL(opt67-url → ztp_data_opt67.json)<br/>prefix tftp://server/ if opt66 set
+  DL-->>ENG: 0, file (records discovering interface)
+  ENG->>ENG: mode=dhcp-opt67; __loadZTPProfile("resume")
+  ENG->>SEC: ZTPJson(ztp_data_opt67.json → ztp_data.json)
+  SEC->>SEC: split sections → /var/lib/ztp/sections/*/input.json; write shadow
+  loop each section (sorted)
+    ENG->>SEC: plugin(sec), pluginArgs(sec)
+    ENG->>PL: run plugin input.json
+    PL-->>ENG: rc → SUCCESS/SUSPEND/FAILED
+  end
+  ENG->>ENG: __evalZTPResult() → SUCCESS/FAILED
+  ENG->>ENG: __removeZTPProfile()
+```
+
+### 7.3 DHCPv6 Option 59
+
+Identical to 7.2 but source = `opt59-v6-url` → `ztp_data_opt59.json`, mode `dhcp6-opt59`, no TFTP prefix.
+
+### 7.4 DHCP/DHCPv6 Option 239 — simple provisioning script
+
+```mermaid
+sequenceDiagram
+  participant HK as exit-hook ztp
+  participant ENG as ztp-engine
+  participant DL as Downloader
+  participant PL as plugin (download/execute script)
+  HK->>HK: write dhcp_239-provisioning-script_url
+  ENG->>DL: __downloadURL(opt239-url → /host/ztp/provisioning-script)
+  ENG->>ENG: __createProvScriptJson() writes ztp_data.json:<br/>{provisioning-script:{plugin:{url:"file:///host/ztp/provisioning-script",ignore-section-data:true}}, restart-ztp-no-config:false}
+  ENG->>PL: run the script as a section plugin
+  PL-->>ENG: rc → result
+```
+The script is wrapped as a section whose plugin is the script itself (`ignore-section-data:true`, so it gets no argv). DHCPv6 Option 239 is the same via `opt239-v6-url`.
+
+### 7.5 DHCP Option 225/226 — minigraph + ACL
+
+```mermaid
+sequenceDiagram
+  participant HK as exit-hook ztp
+  participant ENG as ztp-engine
+  participant DL as Downloader
+  participant GS as graphservice plugin
+  participant CFG as config load_minigraph
+  HK->>HK: write dhcp_graph_url (225) [+ dhcp_acl_url (226)]
+  ENG->>DL: __createGraphserviceJson(): test-download graph (+acl), then write ztp_data.json:<br/>{graphservice:{minigraph-url:{url:...}[,acl-url:{url:...}]}, restart-ztp-no-config:false}
+  ENG->>GS: run graphservice plugin
+  GS->>DL: download → /etc/sonic/minigraph.xml (+ /etc/sonic/acl.json)
+  GS->>CFG: config load_minigraph -y
+  GS->>CFG: config save -y
+  GS-->>ENG: exit rc
+```
+
+### 7.6 Local ZTP JSON file
+
+`ztp_data_local.json` — same processing path as 7.2, no DHCP; `__updateZTPMode('local-fs', ...)`.
+
+### 7.7 Config application via `configdb-json` plugin (the common path)
+
+```mermaid
+sequenceDiagram
+  participant ENG as ztp-engine
+  participant P as configdb-json plugin
+  participant DB as CONFIG_DB
+  participant CFG as config CLI
+  ENG->>P: run input.json
+  P->>P: download url/dynamic-url → /tmp/config_dl.json
+  P->>P: __sanitize_config: keep running platform/hwsku/mac unless overwrite-device-metadata
+  P->>DB: ZTP|mode profile==active? → mod_entry("ZTP","mode",None)
+  P->>CFG: systemctl restart interfaces-config (stop ZTP DHCP)
+  alt clear-config (default)
+    P->>CFG: config reload -f -y config_db.json
+  else incremental
+    P->>CFG: config load -y config_db.json
+  end
+  opt save-config
+    P->>CFG: config save -y
+  end
+  P-->>ENG: exit 0 / rc
+```
+
+### 7.8 SUSPEND / retry semantics (e.g. wait-for-server, `test-plugin`, `connectivity-check`)
+
+```mermaid
+sequenceDiagram
+  participant ENG as ztp-engine
+  participant P as plugin
+  Note over ENG,P: section has "suspend-exit-code": N
+  ENG->>P: run
+  P-->>ENG: exit N  → section = SUSPEND
+  ENG->>ENG: continue other sections; loop re-scans
+  ENG->>P: run again (BOOT/SUSPEND re-picked as IN-PROGRESS)
+  P-->>ENG: exit 0 → SUCCESS  (or other rc → FAILED)
+```
+`__processConfigSections` re-loops while any section is still `IN-PROGRESS`/re-queued; a SUSPENDed section is retried on the next pass and across reboots (it persists in `ztp_data.json`).
+
+### 7.9 Firmware install with reboot
+
+```mermaid
+sequenceDiagram
+  participant ENG as ztp-engine
+  participant FW as firmware plugin
+  participant SI as sonic-installer
+  ENG->>FW: run (install:{url,version,set-default,...})
+  FW->>FW: install.status==SUCCESS? → skip (idempotent across reboot)
+  opt pre-check
+    FW->>FW: download+run pre-check; non-zero → abort op
+  end
+  FW->>SI: list (Current/Next/Available)
+  FW->>FW: download image; sonic-installer binary-version == version?
+  FW->>SI: sonic-installer install -y image
+  FW->>FW: rewrite ztp_data.json: install.status="SUCCESS"
+  FW->>FW: systemReboot()  (unless skip-reboot/reboot-on-success)
+  Note over ENG,FW: after reboot, engine resumes; section already SUCCESS
+```
+
+### 7.10 Result evaluation, restart & reboot decisions (end of `__processZTPJson`)
+
+```mermaid
+flowchart TD
+  A["__evalZTPResult()"] --> B{ignore-result?}
+  B -- yes --> S["overall SUCCESS"]
+  B -- no --> C{any section FAILED & !ignore-result?}
+  C -- yes --> F["overall FAILED"]
+  C -- no --> S
+  S --> R1{restart-ztp-no-config &&<br/>no config_db.json && !config-fallback?}
+  F --> R2{restart-ztp-on-failure?}
+  R1 -- yes --> RESTART["delete ztp_data.json → __forceRestartDiscovery"]
+  R2 -- yes --> RESTART
+  R1 -- no --> STOP["stop → __removeZTPProfile"]
+  R2 -- no --> STOP
+  STOP --> RB{reboot-on-success/failure set?}
+  RB -- yes --> REBOOT["systemReboot()"]
+  RB -- no --> DONE["exit service"]
+```
+
+### 7.11 Invalid downloaded JSON
+
+`ZTPJson(...)` raises `ValueError` → engine deletes `ztp_data.json`/shadow → if `restart-ztp-on-invalid-data` (default True) returns `("restart", ...)` → `__forceRestartDiscovery` (clear leases, wait 300s, rescan); else stop.
+
+### 7.12 Operator CLI use-cases (`/usr/bin/ztp`)
+
+```mermaid
+sequenceDiagram
+  participant U as operator
+  participant CLI as ztp CLI
+  participant SD as systemd
+  participant PS as ztp-profile.sh
+  U->>CLI: ztp run -y
+  CLI->>CLI: admin-mode? erase session; rename config_db.json.<ts>
+  CLI->>SD: systemctl start ztp
+  U->>CLI: ztp disable -y
+  CLI->>SD: systemctl stop ztp
+  CLI->>CLI: setCfg admin-mode=False
+  CLI->>PS: ztp-profile.sh remove config-fallback (load startup/factory)
+  U->>CLI: ztp erase -y
+  CLI->>SD: stop ztp; rm ztp_data.json + shadow
+  U->>CLI: ztp status [-v|-c]
+  CLI->>CLI: read shadow JSON → print overall + per-section
+  U->>CLI: ztp enable
+  CLI->>CLI: setCfg admin-mode=True (file only; no service start)
+```
+
+| Command | Root? | Effect |
+|---|---|---|
+| `ztp enable` | yes | `admin-mode=True` in `ztp_cfg.json` only. |
+| `ztp disable [-y]` | yes | Stop service, `admin-mode=False`, `ztp-profile.sh remove config-fallback`. |
+| `ztp run [-y]` | yes | Erase session, rename existing `config_db.json`, start service (fresh ZTP). |
+| `ztp erase [-y]` | yes | Stop service, delete `ztp_data.json` + shadow. |
+| `ztp status` / `-v` / `-c` | no | Terse / detailed / coded status from shadow JSON. |
+| `ztp features` / `-v` | no | List `feat-*` capabilities compiled into the image. |
+
+---
+
+## 8. The plugins (the "verbs" of ZTP)
+
+All are Python3, receive one arg (`.../input.json`), read it via `ConfigSection`, and communicate purely by **exit code** (0=SUCCESS, `suspend-exit-code`=SUSPEND, other=FAILED).
+
+| Plugin | Purpose | Key section keys | Touches |
+|---|---|---|---|
+| **configdb-json** | Apply a `config_db.json` | `url`/`dynamic-url`, `clear-config`(T), `save-config`(F), `overwrite-device-metadata`(F) | `config reload/-load`, CONFIG_DB, restarts interfaces-config |
+| **graphservice** | Apply minigraph (+ACL) | `minigraph-url`, `acl-url` | `/etc/sonic/minigraph.xml`, `config load_minigraph`, `config save` |
+| **firmware** | Image install/remove/docker-upgrade | `install`/`remove`/`upgrade-docker`, `version`, `set-default`, `pre-check`, `skip-reboot` | `sonic-installer`, reboots |
+| **connectivity-check** | Gate until hosts reachable | `ping-hosts`, `ping6-hosts`, `retry-count`(12), `retry-interval`(5) | `ping` |
+| **download** | Pre-fetch files | `files:[{url,permissions}]` | `curl --create-dirs`, `chmod` |
+| **snmp** | Set SNMP community/location | `community-ro`, `snmp-location`, `restart-agent` | `/etc/sonic/snmp.yml`, restart snmp |
+| **test-plugin** | Test harness for engine semantics | `message`, `sleep`, `attempts`+`suspend-exit-code`, `reboot-in-between`, `fail` | drives SUSPEND/reboot/fail paths |
+
+Custom plugins are supported: a section's `plugin` may be a `url`/`dynamic-url`/`name` object, downloaded to `/var/lib/ztp/sections/<sec>/plugin`; `shell:true` runs it via a shell; `umask` overrides the exec umask.
+
+---
+
+## 9. DHCP integration detail
+
+- **Enter hooks** `inband-ztp-ip` / `inband-ztp-ip6` (installed to `/etc/dhcp/dhclient-enter-hooks.d/`): only act on interfaces matching `Ethernet*` (front-panel in-band), programming the leased IP into ConfigDB via `config interface ip add/remove`. `eth0` management IP is handled by the stock SONiC path, not these.
+- **Exit hook** `ztp`: captures the provisioning-URL DHCP options into `/var/run/ztp/*` (the files `__discover()` reads). Serialized by a lock dir stamped `proto:interface`; also records which interface won (used for `ztp status` "Source").
+- **Exit hook** `ztp-rsyslog`: on lease bind, rewrites `/etc/rsyslog.d/10-ztp-log-forwarding.conf` from DHCP-provided `new_log_servers` and restarts rsyslog — remote log forwarding during provisioning.
+- **`ifupdown2_dhcp_policy.j2`** → `/etc/network/ifupdown2/policy.d/ztp_dhcp.json`: sets `dhcp-wait:no`, and link-layer DUID (`dhcp6-duid:LL`) with `dhcp6-ll-wait 0` on in-band ports / `2` on eth0. `ztp-profile.sh` deletes stale DHCPv6 lease files when creating this policy so the LL DUID is used.
+
+`ztp` and the older `graphserviceurl` DHCP-minigraph mechanism are **mutually exclusive** (`files/dhcp/graphserviceurl` no-ops unless `ztp status -c == 0:DISABLED`).
+
+---
+
+## 10. Safety interlocks (explicitly in code)
+
+1. **ZTP never overwrites an existing config.** `__discover()` returns `MANUAL_CONFIG` (and the service exits) if `config_db.json` or `minigraph.xml` exists, or on **warm boot** (`SONIC_BOOT_TYPE=warm` in `/proc/cmdline`).
+2. **admin-mode gate** — disabled → engine removes profile and exits immediately.
+3. **Idempotent/resumable** — session state persists in `ztp_data.json`; a reboot mid-firmware resumes because the section is already `SUCCESS`; SUSPEND sections retry.
+4. **Sensitive data isolation** — operators/`ztp status` only ever see the sanitized shadow JSON.
+5. **Clean teardown** — `__removeZTPProfile` deletes the `ZTP` table and, with `config-fallback`, loads startup/factory config so the box lands in a defined state.
+
+---
+
+## 11. Runtime dependency map
+
+```
+ztp-engine.py
+ ├─ swsscommon (ConfigDBConnector, SonicV2Connector)   ← link-scan, profile-active check
+ ├─ natsort                                            ← interface ordering
+ ├─ ztp lib (ZTPSections, ZTPObjects, Downloader, ZTPCfg, Logger, DecodeSysEeprom)
+ │    ├─ curl        (Downloader)          ├─ decode-syseeprom (device identity/headers)
+ │    └─ sonic-cfggen (get_sonic_version)  └─ syslog/rsyslog (Logger)
+ ├─ ztp-profile.sh → sonic-cfggen, sonic-db-cli, config, config-setup, decode-syseeprom, ifupdown2
+ ├─ plugins → config, sonic-installer, ping, systemctl, sed/grep
+ └─ DHCP → isc-dhcp-client + hooks → config interface ip, rsyslog
+Package Depends (debian/control): python3, curl, ifupdown2(>=1.2.8), isc-dhcp-client, python3-natsort
+Build Depends (rules/sonic-ztp.mk): libswsscommon, python3-swsscommon
+ConfigDB schema: sonic-ztp.yang → ZTP|mode{profile,inband,out-of-band,ipv4,ipv6,product-name,serial-no}
+```
+
+---
+
+## Appendix — source-level notes worth flagging
+
+- The config key is misspelled `rsyslog-ztp-consile-log-file-conf` in `defaults.py` (should be "console").
+- `json-indent` is referenced by `ZTPSections` (`getCfg('json-indent')`) but is **not** present in `defaultCfg`, so it resolves to `None`.
+- `ConfigSection.__init__` docstring says `/etc/sonic/ztp_data.json` but the code uses `getCfg('ztp-json')` = `/host/ztp/ztp_data.json`.
+- The build flag is `ENABLE_ZTP` (y/n); there is no `INCLUDE_ZTP`.
